@@ -1,3 +1,5 @@
 src/proxy/ftd2xx.dll
 src/proxy/ftd2xx.lib
 *.o
+
+src/olc/*.olc
