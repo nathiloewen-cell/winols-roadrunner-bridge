@@ -17,6 +17,8 @@
 #include "logger.h"
 #include "real_ftd2xx.h"
 #include "device_spoof.h"
+#include "roadrunner.h"
+#include "protocol_bridge.h"
 
 /* ── DLL entry point ────────────────────────────────────────────────── */
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
@@ -124,12 +126,16 @@ FT_STATUS __stdcall FT_OpenEx(PVOID arg, DWORD flags, FT_HANDLE* handle) {
     FT_STATUS r = real_FT_OpenEx(arg, flags, handle);
     log_write("  -> handle=%p status=%lu",
               handle ? *handle : NULL, (unsigned long)r);
+    /* S5: register handle with bridge so FT_Read/Write are intercepted */
+    if (r == FT_OK && handle && *handle)
+        bridge_on_open(*handle, -1);  /* COM port auto-detected */
     return r;
 }
 
 __declspec(dllexport)
 FT_STATUS __stdcall FT_Close(FT_HANDLE handle) {
     log_write("FT_Close(handle=%p)", handle);
+    bridge_on_close(handle);
     if (!real_FT_Close) return FT_OTHER_ERROR;
     return real_FT_Close(handle);
 }
@@ -140,6 +146,11 @@ FT_STATUS __stdcall FT_Write(FT_HANDLE handle, LPVOID buf,
                               DWORD count, LPDWORD written) {
     log_write("FT_Write(handle=%p, %lu bytes)", handle, (unsigned long)count);
     log_hex("TX", buf, count);
+
+    /* S5/S6: intercept if this is the Roadrunner handle */
+    if (bridge_handle_write(handle, (const BYTE*)buf, count, written))
+        return FT_OK;
+
     if (!real_FT_Write) return FT_OTHER_ERROR;
     FT_STATUS r = real_FT_Write(handle, buf, count, written);
     log_write("  -> written=%lu status=%lu",
@@ -150,6 +161,13 @@ FT_STATUS __stdcall FT_Write(FT_HANDLE handle, LPVOID buf,
 __declspec(dllexport)
 FT_STATUS __stdcall FT_Read(FT_HANDLE handle, LPVOID buf,
                              DWORD count, LPDWORD read_bytes) {
+    /* S5/S6: serve response from bridge buffer if available */
+    if (bridge_handle_read(handle, (BYTE*)buf, count, read_bytes)) {
+        if (read_bytes && *read_bytes > 0)
+            log_hex("RX(bridge)", buf, *read_bytes);
+        return FT_OK;
+    }
+
     if (!real_FT_Read) return FT_OTHER_ERROR;
     FT_STATUS r = real_FT_Read(handle, buf, count, read_bytes);
     log_write("FT_Read(handle=%p, req=%lu, got=%lu) -> %lu",
