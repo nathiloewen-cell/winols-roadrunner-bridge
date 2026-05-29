@@ -16,6 +16,7 @@
 #include "ftd2xx_proxy.h"
 #include "logger.h"
 #include "real_ftd2xx.h"
+#include "device_spoof.h"
 
 /* ── DLL entry point ────────────────────────────────────────────────── */
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
@@ -64,12 +65,14 @@ FT_STATUS __stdcall FT_GetDeviceInfoList(FT_DEVICE_LIST_INFO_NODE* list,
     FT_STATUS r = real_FT_GetDeviceInfoList(list, count);
     if (r == FT_OK && list && count) {
         for (DWORD i = 0; i < *count; i++) {
-            log_write("  Device[%lu]: ID=0x%08lX desc='%s' serial='%s' flags=0x%lX",
+            log_write("  Device[%lu]: ID=0x%08lX desc='%s' serial='%s'",
                       (unsigned long)i,
                       (unsigned long)list[i].ID,
                       list[i].Description,
-                      list[i].SerialNumber,
-                      (unsigned long)list[i].Flags);
+                      list[i].SerialNumber);
+            /* S4: Spoof Roadrunner as Batronix for WinOLS */
+            if (is_roadrunner(&list[i]))
+                spoof_node(&list[i]);
         }
     }
     log_write("FT_GetDeviceInfoList -> %lu devices, status=%lu",
@@ -112,6 +115,12 @@ FT_STATUS __stdcall FT_OpenEx(PVOID arg, DWORD flags, FT_HANDLE* handle) {
     else
         log_write("FT_OpenEx(arg=%p flags=0x%lX)", arg, (unsigned long)flags);
     if (!real_FT_OpenEx) return FT_OTHER_ERROR;
+
+    /* S4: If WinOLS opens "Prog-Express 16" / "Batronix", redirect to Roadrunner */
+    const char* real_desc = NULL;
+    if (spoof_open_ex(arg, flags, &real_desc))
+        arg = (PVOID)real_desc;
+
     FT_STATUS r = real_FT_OpenEx(arg, flags, handle);
     log_write("  -> handle=%p status=%lu",
               handle ? *handle : NULL, (unsigned long)r);
