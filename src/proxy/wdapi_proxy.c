@@ -318,17 +318,24 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
          pMatchTables ? pMatchTables[0].wVendorId : 0,
          pMatchTables ? pMatchTables[0].wProductId : 0);
 
-    /* Try real wdapi first — it will find the Roadrunner via WinUSB */
+    /* Try real wdapi — first open driver with demo license, then init USB */
+    typedef DWORD (__cdecl *PFN_OPEN)(DWORD, const char*);
     typedef DWORD (__cdecl *PFN_INIT)(WDU_DRIVER_HANDLE*, WDU_MATCH_TABLE*,
                                        DWORD, void*, const char*, DWORD);
+    PFN_OPEN real_open = (PFN_OPEN)get_real("WDC_DriverOpen");
     PFN_INIT real_init = (PFN_INIT)get_real("WDU_Init");
-    if (real_init) {
+
+    if (real_open && real_init) {
+        /* Register WinDriver demo license first (WinOLS skips WDC_DriverOpen) */
+        DWORD open_r = real_open(0, "12345abcde1234.license");
+        wlog("  WDC_DriverOpen (demo license) -> 0x%08lX", (unsigned long)open_r);
+
         DWORD r = real_init(phDriver, pMatchTables, dwNumMatchTables,
                             pEventTable, sLicense, dwOptions);
         wlog("  WDU_Init (real) -> 0x%08lX handle=%p",
              (unsigned long)r, phDriver ? *phDriver : NULL);
-        if (r == 0 || (phDriver && *phDriver)) {
-            wlog("  Real WDU_Init succeeded — WinUSB device found!");
+        if (r == 0) {
+            wlog("  Real WDU_Init SUCCESS — WinUSB device found, native pfDeviceAttach will fire!");
             return r;
         }
         wlog("  Real WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
