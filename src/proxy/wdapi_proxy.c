@@ -326,13 +326,12 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     PFN_INIT real_init = (PFN_INIT)get_real("WDU_Init");
 
     if (real_open && real_init) {
-        /* Register WinDriver demo license first (WinOLS skips WDC_DriverOpen) */
-        DWORD open_r = real_open(0, "12345abcde1234.license");
-        wlog("  WDC_DriverOpen (demo license) -> 0x%08lX", (unsigned long)open_r);
+        /* Use WinOLS's own WinDriver license (works with wdapi1100 + windrvr6) */
+        DWORD open_r = real_open(0, sLicense);
+        wlog("  WDC_DriverOpen (WinOLS license) -> 0x%08lX", (unsigned long)open_r);
 
-        /* Use demo license for WDU_Init — WinOLS's license is for WinDriver 11 */
         DWORD r = real_init(phDriver, pMatchTables, dwNumMatchTables,
-                            pEventTable, "12345abcde1234.license", dwOptions);
+                            pEventTable, sLicense, dwOptions);
         wlog("  WDU_Init (real, demo lic) -> 0x%08lX handle=%p",
              (unsigned long)r, phDriver ? *phDriver : NULL);
         if (r == 0) {
