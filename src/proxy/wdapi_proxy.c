@@ -165,25 +165,12 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         init_self_referencing(g_fake_stream_data,  64);
         AddVectoredExceptionHandler(1, veh_handler);
         log_init();
-        /* Load the real wdapi1100 from our backup name */
-        char path[MAX_PATH];
-        GetModuleFileNameA(NULL, path, MAX_PATH);
-        char* last = strrchr(path, '\\');
-        if (last) {
-            strcpy_s(last+1, MAX_PATH - (last-path) - 1, "wdapi1100_real.dll");
-        }
-        g_real = LoadLibraryA(path);
-        if (g_real) {
-            wlog("Loaded real wdapi from: %s", path);
-        } else {
-            /* Try System32 as fallback */
-            g_real = LoadLibraryA("wdapi1100_real.dll");
-            if (!g_real) wlog("WARNING: could not load wdapi1100_real.dll");
-        }
+        /* Do NOT load wdapi1100_real.dll — it crashes at init without windrvr.sys.
+           All functions are implemented as stubs below. No real DLL needed. */
+        wlog("wdapi proxy loaded (standalone mode — no real DLL)");
     } else if (reason == DLL_PROCESS_DETACH) {
         wlog("wdapi proxy unloaded");
         log_close();
-        if (g_real) FreeLibrary(g_real);
     }
     return TRUE;
 }
@@ -592,22 +579,16 @@ __declspec(dllexport) DWORD __cdecl WDC_DriverClose(void) {
 }
 
 __declspec(dllexport) DWORD __cdecl WDC_Version(char* pVer, DWORD dwLen) {
-    typedef DWORD (__cdecl *PFN)(char*, DWORD);
-    PFN fn = (PFN)get_real("WDC_Version");
-    DWORD r = fn ? fn(pVer, dwLen) : 0;
-    if (pVer) wlog("WDC_Version -> '%s'", pVer);
-    return r;
+    /* Return fake version string */
+    if (pVer && dwLen > 10) strncpy_s(pVer, dwLen, "11.0.0", _TRUNCATE);
+    return 0;
 }
 
-/* All remaining wdapi exports — simple passthrough via GetProcAddress */
-#define PT0(name) __declspec(dllexport) DWORD __cdecl name(void) \
-    { typedef DWORD (__cdecl *F)(void); F f=(F)get_real(#name); return f?f():0; }
-
-#define PT1(name, T1) __declspec(dllexport) DWORD __cdecl name(T1 a) \
-    { typedef DWORD (__cdecl *F)(T1); F f=(F)get_real(#name); return f?f(a):0; }
-
-#define PT2(name, T1, T2) __declspec(dllexport) DWORD __cdecl name(T1 a, T2 b) \
-    { typedef DWORD (__cdecl *F)(T1,T2); F f=(F)get_real(#name); return f?f(a,b):0; }
+/* Stub macros — no real DLL, just return 0 */
+#define PT0(name) __declspec(dllexport) DWORD __cdecl name(void) { return 0; }
+#define PT1(name, T1) __declspec(dllexport) DWORD __cdecl name(T1 a) { (void)a; return 0; }
+#define PT2(name, T1, T2) __declspec(dllexport) DWORD __cdecl name(T1 a, T2 b) { (void)a;(void)b; return 0; }
+#define PT3(name, T1, T2, T3) __declspec(dllexport) DWORD __cdecl name(T1 a,T2 b,T3 c) { (void)a;(void)b;(void)c; return 0; }
 
 PT1(WDC_Err, DWORD)
 PT1(WDC_Trace, DWORD)
@@ -628,10 +609,7 @@ PT0(WD_LogStart)
 PT0(WDC_Sleep)
 PT0(get_os_type)
 
-/* ── All other exports are forwarded via wdapi1100.def → wdapi1100_real ─
-   Do NOT add PT macros here — wrong arg counts cause access violations.
-   The DEF file forwarder approach passes args unchanged.              ── */
-#if 0  /* disabled - use DEF forwarders instead */
+/* ── Stubs for all remaining exports (previously DEF-forwarded) ─────── */
 PT1(OsMutexCreate,  void*)
 PT1(OsMutexClose,   void*)
 PT1(OsMutexLock,    void*)
@@ -737,8 +715,12 @@ PT_RWADDR(WDC_PciReadCfg)
 PT_RWADDR(WDC_PciWriteCfg)
 PT_RWADDR(WDC_PciReadCfgBySlot)
 PT_RWADDR(WDC_PciWriteCfgBySlot)
+/* base-variant stubs (no width suffix) */
+PT2(WDC_PciReadCfg,      void*, void*)
+PT2(WDC_PciWriteCfg,     void*, void*)
+PT2(WDC_PciReadCfgBySlot,  void*, void*)
+PT2(WDC_PciWriteCfgBySlot, void*, void*)
 
 /* ── WD logging / driver name ─────────────────────────────────────────── */
 PT1(WD_DriverName,   const char*)
 PT1(WdFunctionLog,   void*)
-#endif  /* disabled PT macros */
