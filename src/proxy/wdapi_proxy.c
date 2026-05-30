@@ -74,6 +74,16 @@ static void log_hex(const char* label, const void* buf, DWORD len) {
     LeaveCriticalSection(&g_cs);
 }
 
+/* ── Self-referencing fake handles (prevent NULL-dereference crashes) ── */
+static DWORD g_fake_driver_data[64];
+static DWORD g_fake_device_data[64];
+static DWORD g_fake_stream_data[64];
+
+static void init_self_referencing(DWORD* arr, DWORD sz) {
+    for (DWORD i = 0; i < sz; i++)
+        arr[i] = (DWORD)(uintptr_t)arr;
+}
+
 /* ── Real DLL loader ─────────────────────────────────────────────────── */
 static HMODULE g_real = NULL;
 
@@ -118,6 +128,10 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     (void)hInst; (void)res;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hInst);
+        /* Pre-fill fake handles so pointer-chasing doesn't hit NULL */
+        init_self_referencing(g_fake_driver_data, 64);
+        init_self_referencing(g_fake_device_data, 64);
+        init_self_referencing(g_fake_stream_data,  64);
         log_init();
         /* Load the real wdapi1100 from our backup name */
         char path[MAX_PATH];
@@ -146,11 +160,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
 #define OLS300_VID  0x0547
 #define OLS300_PID  0x3000
 
-/* WinOLS dereferences device handles as pointers to internal structures.
-   We allocate real memory so reads return 0 instead of crashing.
-   Size 256 bytes covers any internal WinDriver device struct WinOLS reads. */
-static DWORD g_fake_driver_data[64] = {0};
-static DWORD g_fake_device_data[64] = {0};
+/* (fake handle arrays declared at top of file) */
 
 #define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)g_fake_driver_data)
 #define FAKE_DEVICE_HANDLE  ((WDU_DEVICE_HANDLE)g_fake_device_data)
@@ -343,8 +353,7 @@ DWORD __cdecl WDU_TransferBulk(WDU_DEVICE_HANDLE hDevice,
 }
 
 /* ── WDU Stream functions ─────────────────────────────────────────────── */
-/* Fake stream handle — real wdapi needs WinDriver kernel which isn't installed */
-static DWORD g_fake_stream_data[64] = {0};
+/* (fake stream handle array declared at top of file) */
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamOpen(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum,
