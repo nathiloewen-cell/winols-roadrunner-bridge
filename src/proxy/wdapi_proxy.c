@@ -497,14 +497,25 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
            Return enough data to make WinOLS accept the module. */
         memset(pBuffer, 0, dwBytes < 448 ? dwBytes : 448);
         BYTE* b = (BYTE*)pBuffer;
-        /* Module type identifier */
-        b[0] = 0x4F; b[1] = 0x4C; b[2] = 0x53;  /* "OLS" */
-        b[3] = 0x38; b[4] = 0x32; b[5] = 0x31;  /* "821" */
-        b[6] = 0x00; b[7] = 0x00;                /* null */
-        /* Status: connected, ready */
-        b[8] = 0x01;  /* status = OK */
-        /* Firmware version: 1.0 */
-        b[10] = 0x01; b[11] = 0x00;
+        /* From reverse engineering: OLS module struct stores "OLS821" at offset 0x50=80.
+           This comes from the WDU_Transfer init response. Try various locations. */
+        /* Try: offset 0 header */
+        b[0] = 0x01;  /* magic/version */
+        b[1] = 0x00;
+        /* offset 0x08 = 8: status */
+        b[8] = 0x01;
+        /* offset 0x10 = 16: type identifier */
+        b[16] = 0x03;  /* OLS300 type */
+        /* offset 0x50 = 80: firmware version string "OLS821" */
+        if ((int)dwBytes > 86) {
+            b[0x50] = 0x4F; b[0x51] = 0x4C; b[0x52] = 0x53;  /* OLS */
+            b[0x53] = 0x38; b[0x54] = 0x32; b[0x55] = 0x31;  /* 821 */
+        }
+        /* offset 0xD0 = 208: second copy */
+        if ((int)dwBytes > 214) {
+            b[0xD0] = 0x4F; b[0xD1] = 0x4C; b[0xD2] = 0x53;
+            b[0xD3] = 0x38; b[0xD4] = 0x32; b[0xD5] = 0x31;
+        }
         if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes < 448 ? dwBytes : 448;
         wlog("WDU_Transfer FAKE OLS300 ID response (pipe=0x%lX, %lu bytes)",
              (unsigned long)dwPipeNum, (unsigned long)*pdwBytesTransferred);
