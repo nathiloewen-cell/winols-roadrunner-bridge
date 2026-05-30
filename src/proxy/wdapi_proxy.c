@@ -338,17 +338,17 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         wlog("  WDU_Init (real) -> 0x%08lX real_handle=%p",
              (unsigned long)r, real_handle);
         if (r == 0 && real_handle) {
-            /* SUCCESS — pass real wdapi handle to pfDeviceAttach */
+            /* SUCCESS — store real handle, fire fake attach (with NULL device info
+         to avoid layout mismatch crash). WinOLS uses real handle for WDU_Transfer */
             if (phDriver) *phDriver = real_handle;
-            wlog("  WDU_Init SUCCESS with real handle — passing to pfDeviceAttach");
-            /* Schedule pfDeviceAttach with REAL handle */
+            wlog("  WDU_Init SUCCESS with real handle %p", real_handle);
             if (pEventTable) {
                 WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
                 if (tbl->pfDeviceAttach) {
                     g_attach_cb       = tbl->pfDeviceAttach;
                     g_attach_userdata = tbl->pUserData;
-                    g_attach_handle   = real_handle;  /* real wdapi handle! */
-                    wlog("  Scheduling pfDeviceAttach with REAL handle in 500ms");
+                    g_attach_handle   = real_handle;
+                    wlog("  Scheduling pfDeviceAttach with real handle + NULL device");
                     HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
                                              CREATE_SUSPENDED, NULL);
                     if (ht) {
@@ -412,9 +412,12 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     Sleep(500);
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
+    /* Use NULL for device info when using real handle — avoids layout mismatch crash.
+       WinOLS may reject device if NULL, but won't crash. With fake handle use fake device. */
+    WDU_DEVICE* use_device = g_attach_handle ? NULL : &g_fake_device;
     wlog("[attach] pfDeviceAttach(handle=%p real=%d device=%p userData=%p)",
-         use_handle, (g_attach_handle != NULL), &g_fake_device, g_attach_userdata);
-    BOOL ok = g_attach_cb(use_handle, &g_fake_device, g_attach_userdata);
+         use_handle, (g_attach_handle != NULL), use_device, g_attach_userdata);
+    BOOL ok = g_attach_cb(use_handle, use_device, g_attach_userdata);
     wlog("[attach] pfDeviceAttach returned %d", ok);
     return 0;
 }
