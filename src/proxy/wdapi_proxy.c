@@ -270,10 +270,12 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     if (pEventTable) {
         WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
         if (tbl->pfDeviceAttach) {
-            wlog("  Calling pfDeviceAttach(handle=%p, device=%p, userData=%p)",
-                 FAKE_DEVICE_HANDLE, &g_fake_device, tbl->pUserData);
+            /* Pass NULL for device info first — if WinOLS only needs the
+               handle, this avoids struct layout mismatches entirely.      */
+            wlog("  Calling pfDeviceAttach(handle=%p, device=NULL, userData=%p)",
+                 FAKE_DEVICE_HANDLE, tbl->pUserData);
             BOOL ok = tbl->pfDeviceAttach(FAKE_DEVICE_HANDLE,
-                                          &g_fake_device,
+                                          NULL,
                                           tbl->pUserData);
             wlog("  pfDeviceAttach returned %d", ok);
         } else {
