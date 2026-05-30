@@ -490,7 +490,11 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
        The OLS300 responds with its firmware info. We fake this response so WinOLS
        accepts the connection. Based on reverse engineering: WinOLS stores "OLS821"
        as module identifier; return minimal OLS identification response. */
-    if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16) {
+    /* Limit fake responses to avoid infinite loop hang */
+    static volatile LONG g_fake_read_count = 0;
+    LONG cnt = InterlockedIncrement(&g_fake_read_count);
+
+    if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16 && cnt <= 5) {
         /* OLS300 identification response (structure discovered from reverse engineering):
            Bytes 0-7: model string "OLS821\0\0"  (or similar firmware version)
            Bytes 8-N: firmware data, status flags, capabilities
