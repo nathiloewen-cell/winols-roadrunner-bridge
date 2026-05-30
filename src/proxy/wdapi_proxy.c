@@ -141,18 +141,11 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
         DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
         DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
 
-        /* Catch both READ (op=0) and WRITE (op=1) violations in bad address ranges.
-           Native WinDriver pfDeviceAttach passes WD16 structs → WD11 WinOLS reads
-           from low/invalid addresses. Catch and redirect to safe buffer. */
+        /* Catch READ and WRITE violations ONLY in the null-guard and kernel ranges.
+           Do NOT catch uncommitted pages — WinDriver legitimately allocates those.
+           Native WinDriver pfDeviceAttach reads from low addresses due to WD16/WD11
+           struct mismatch — the null guard catch handles this. */
         BOOL is_bad = (fault < 0x10000 || fault >= 0x80000000);
-
-        /* Also check uncommitted pages in normal user range */
-        if (!is_bad && fault >= 0x10000 && fault < 0x80000000) {
-            MEMORY_BASIC_INFORMATION mbi;
-            if (VirtualQuery((void*)(uintptr_t)fault, &mbi, sizeof(mbi)) &&
-                mbi.State != MEM_COMMIT)
-                is_bad = TRUE;
-        }
 
         if (is_bad) {
             CONTEXT* ctx = pEx->ContextRecord;
