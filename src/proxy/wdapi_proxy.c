@@ -142,39 +142,150 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     return TRUE;
 }
 
-/* ── OLS300 device identity (discovered from WDU_Init log) ──────────── */
-#define OLS300_VID  0x0547   /* Cypress Semiconductor FX2 */
-#define OLS300_PID  0x3000   /* OLS300 product ID        */
+/* ── OLS300 device identity (confirmed from WDU_Init log) ───────────── */
+#define OLS300_VID  0x0547
+#define OLS300_PID  0x3000
 
-/* Fake driver handle — WinDriver kernel is not installed on this PC.
-   We return a fake success so WinOLS doesn't crash, then intercept all
-   USB transfer calls to translate them to Roadrunner (Moates) protocol. */
-#define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)0x4F4C5300)  /* "OLS\0" */
+#define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)0x4F4C5300)
 #define FAKE_DEVICE_HANDLE  ((WDU_DEVICE_HANDLE)0x4F4C5301)
 
-/* ── WDU_Init — return fake success so WinOLS doesn't crash ─────────── */
+/* ── WinDriver USB device structures (minimal subset) ───────────────── */
+typedef struct {
+    BYTE  bLength; BYTE bDescriptorType; WORD bcdUSB;
+    BYTE  bDeviceClass; BYTE bDeviceSubClass; BYTE bDeviceProtocol;
+    BYTE  bMaxPacketSize0;
+    WORD  idVendor; WORD idProduct; WORD bcdDevice;
+    BYTE  iManufacturer; BYTE iProduct; BYTE iSerialNumber;
+    BYTE  bNumConfigurations;
+} WDU_DEVICE_DESCRIPTOR;
+
+typedef struct {
+    BYTE bEndpointAddress;  /* 0x02=BulkOUT, 0x86=BulkIN */
+    BYTE bmAttributes;      /* 0x02 = Bulk */
+    WORD wMaxPacketSize;
+    BYTE bInterval;
+    BYTE bPipeType;         /* WDU_PIPE_TYPE_BULK = 3 */
+    DWORD dwNumber;         /* pipe index used in WDU_Transfer */
+    DWORD dwMaximumPacketSize;
+    BYTE direction;         /* 0=OUT, 1=IN */
+    BYTE pad[3];
+} WDU_PIPE_INFO;
+
+typedef struct {
+    BYTE bInterfaceNumber; BYTE bAlternateSetting;
+    BYTE bNumEndpoints;    BYTE bInterfaceClass;
+    BYTE bInterfaceSubClass; BYTE bInterfaceProtocol;
+    BYTE iInterface;       BYTE pad;
+    WDU_PIPE_INFO* pPipes;
+} WDU_ALTERNATE_SETTING;
+
+typedef struct {
+    WDU_ALTERNATE_SETTING* pAlternateSettings;
+    DWORD dwNumAltSettings;
+    WDU_ALTERNATE_SETTING* pActiveAltSetting;
+} WDU_INTERFACE;
+
+typedef struct {
+    BYTE bLength; BYTE bDescriptorType; WORD wTotalLength;
+    BYTE bNumInterfaces; BYTE bConfigurationValue;
+    BYTE iConfiguration; BYTE bmAttributes; BYTE MaxPower;
+} WDU_CONFIGURATION_DESCRIPTOR;
+
+typedef struct {
+    WDU_CONFIGURATION_DESCRIPTOR Descriptor;
+    WDU_INTERFACE* pInterfaces;
+    DWORD dwNumInterfaces;
+} WDU_CONFIGURATION;
+
+typedef struct {
+    WDU_DEVICE_DESCRIPTOR Descriptor;
+    WDU_CONFIGURATION*    pConfigs;
+    WDU_CONFIGURATION*    pActiveConfig;
+    WDU_ALTERNATE_SETTING* pActiveInterface[1];
+} WDU_DEVICE;
+
+/* WDU_EVENT_TABLE callback signatures */
+typedef BOOL  (__cdecl *WDU_ATTACH_CALLBACK)(WDU_DEVICE_HANDLE, WDU_DEVICE*, PVOID);
+typedef void  (__cdecl *WDU_DETACH_CALLBACK)(WDU_DEVICE_HANDLE, PVOID);
+typedef BOOL  (__cdecl *WDU_POWER_CALLBACK) (WDU_DEVICE_HANDLE, DWORD, PVOID);
+
+typedef struct {
+    WDU_ATTACH_CALLBACK pfDeviceAttach;
+    WDU_DETACH_CALLBACK pfDeviceDetach;
+    WDU_POWER_CALLBACK  pfPowerChange;
+    PVOID               pUserData;
+} WDU_EVENT_TABLE;
+
+/* ── Fake OLS300 USB device info ─────────────────────────────────────── */
+static WDU_PIPE_INFO g_pipes[2] = {
+    /* Bulk OUT pipe 0 — WinOLS sends commands on this */
+    { 0x02, 0x02, 64, 0, 3, 0, 64, 0, {0,0,0} },
+    /* Bulk IN  pipe 1 — WinOLS reads responses on this */
+    { 0x86, 0x02, 64, 0, 3, 1, 64, 1, {0,0,0} },
+};
+static WDU_ALTERNATE_SETTING g_altset = {
+    0, 0, 2, 0xFF, 0, 0, 0, 0, g_pipes
+};
+static WDU_INTERFACE g_iface = { &g_altset, 1, &g_altset };
+static WDU_CONFIGURATION_DESCRIPTOR g_cfgdesc = {
+    9, 2, sizeof(WDU_CONFIGURATION_DESCRIPTOR), 1, 1, 0, 0x80, 250
+};
+static WDU_CONFIGURATION g_config;   /* initialized in WDU_Init */
+static WDU_DEVICE        g_fake_device;
+
+/* ── WDU_Init — fake success + trigger attach callback ──────────────── */
 __declspec(dllexport)
 DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
-                        WDU_MATCH_TABLE* pMatchTables,
-                        DWORD dwNumMatchTables,
-                        void* pEventTable,
-                        const char* sLicense,
-                        DWORD dwOptions) {
-    wlog("WDU_Init: VID=0x%04X PID=0x%04X (OLS300 confirmed)",
+                        WDU_MATCH_TABLE*   pMatchTables,
+                        DWORD              dwNumMatchTables,
+                        void*              pEventTable,
+                        const char*        sLicense,
+                        DWORD              dwOptions) {
+    wlog("WDU_Init: VID=0x%04X PID=0x%04X",
          pMatchTables ? pMatchTables[0].wVendorId : 0,
          pMatchTables ? pMatchTables[0].wProductId : 0);
 
-    /* Do NOT call real WDU_Init — WinDriver kernel not installed.
-       Return fake success so WinOLS proceeds without crash.
-       All subsequent WDU_Transfer calls will be bridged to Roadrunner. */
     if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
-    wlog("  WDU_Init -> fake success, handle=%p", FAKE_DRIVER_HANDLE);
-    return 0;  /* WD_STATUS_SUCCESS */
+    wlog("  WDU_Init -> fake success, now triggering attach callback");
+
+    /* Build fake device structures at runtime (can't use static init with ptrs) */
+    g_config.Descriptor   = g_cfgdesc;
+    g_config.pInterfaces  = &g_iface;
+    g_config.dwNumInterfaces = 1;
+    memset(&g_fake_device, 0, sizeof(g_fake_device));
+    g_fake_device.Descriptor.bLength            = 18;
+    g_fake_device.Descriptor.bDescriptorType    = 1;
+    g_fake_device.Descriptor.bcdUSB             = 0x0200;
+    g_fake_device.Descriptor.idVendor           = OLS300_VID;
+    g_fake_device.Descriptor.idProduct          = OLS300_PID;
+    g_fake_device.Descriptor.bcdDevice          = 0x0100;
+    g_fake_device.Descriptor.bMaxPacketSize0    = 64;
+    g_fake_device.Descriptor.bNumConfigurations = 1;
+    g_fake_device.pConfigs       = &g_config;
+    g_fake_device.pActiveConfig  = &g_config;
+    g_fake_device.pActiveInterface[0] = &g_altset;
+
+    /* Call WinOLS device-attach callback so it thinks OLS300 is connected.
+       This makes 'Load/Disconnect' active and triggers WDU_Transfer calls. */
+    if (pEventTable) {
+        WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
+        if (tbl->pfDeviceAttach) {
+            wlog("  Calling pfDeviceAttach(handle=%p, device=%p, userData=%p)",
+                 FAKE_DEVICE_HANDLE, &g_fake_device, tbl->pUserData);
+            BOOL ok = tbl->pfDeviceAttach(FAKE_DEVICE_HANDLE,
+                                          &g_fake_device,
+                                          tbl->pUserData);
+            wlog("  pfDeviceAttach returned %d", ok);
+        } else {
+            wlog("  WARNING: pfDeviceAttach is NULL");
+        }
+    }
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
-    wlog("WDU_Uninit(handle=%p) -> fake OK", hDriver);
+    wlog("WDU_Uninit -> fake OK");
     return 0;
 }
 
