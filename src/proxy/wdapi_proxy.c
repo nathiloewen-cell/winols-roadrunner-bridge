@@ -263,26 +263,20 @@ typedef struct {
     _PAD64(pInterfaces);                      /* offset 20 */
 } WDU_CONFIGURATION;
 
-/* WD16.6 WDU_DEVICE layout (32-bit with PAD_TO_64):
+/* WD11 WDU_DEVICE layout (WinOLS compiled for WinDriver 11):
    offset 0:  Descriptor (18 bytes)
    offset 18: padding (2 bytes)
-   offset 20: Pipe0 (WDU_PIPE_INFO = 20 bytes) ← NEW in WD16
-   offset 40: pConfigs (4) + pad (4)
-   offset 48: pActiveConfig (4) + pad (4)
-   offset 56: pActiveInterface[0..N] (8 bytes each with pad)
+   offset 20: pConfigs
+   offset 24: pActiveConfig
+   offset 28: pActiveInterface[0..15]  (WD_MAXDEVICES=16 confirmed)
 */
 #define WD_MAXDEVICES 16
 
 typedef struct {
-    WDU_DEVICE_DESCRIPTOR  Descriptor;            /* offset 0 (18 bytes) */
-    BYTE                   _pad[2];               /* offset 18 */
-    WDU_PIPE_INFO          Pipe0;                 /* offset 20 (20 bytes) */
-    WDU_CONFIGURATION*     pConfigs;              /* offset 40 */
-    _PAD64(pConfigs);                             /* offset 44 */
-    WDU_CONFIGURATION*     pActiveConfig;         /* offset 48 */
-    _PAD64(pActiveConfig);                        /* offset 52 */
-    WDU_ALTERNATE_SETTING* pActiveInterface[WD_MAXDEVICES]; /* offset 56 */
-    DWORD                  _pad_iface[WD_MAXDEVICES]; /* PAD_TO_64 per entry */
+    WDU_DEVICE_DESCRIPTOR  Descriptor;
+    WDU_CONFIGURATION*     pConfigs;
+    WDU_CONFIGURATION*     pActiveConfig;
+    WDU_ALTERNATE_SETTING* pActiveInterface[WD_MAXDEVICES];
 } WDU_DEVICE;
 
 /* WDU_EVENT_TABLE callback signatures */
@@ -300,16 +294,14 @@ typedef struct {
 /* ── Fake OLS300 USB device info (WD16.6 struct layout) ─────────────── */
 /* WDU_PIPE_INFO: dwNumber, dwMaximumPacketSize, type, direction, dwInterval */
 static WDU_PIPE_INFO g_pipes[2] = {
-    { 0, 64, 3, 2, 0 },   /* pipe 0 = Bulk OUT (type=3=bulk, dir=2=OUT) */
-    { 1, 64, 3, 1, 0 },   /* pipe 1 = Bulk IN  (dir=1=IN) */
+    { 0, 64, 3, 2, 0 },   /* pipe 0: Bulk OUT */
+    { 1, 64, 3, 1, 0 },   /* pipe 1: Bulk IN  */
 };
 static WDU_ALTERNATE_SETTING g_altset = {
-    0, 0, 2, 0xFF, 0, 0, 0, 0, g_pipes, 0  /* pPipes + PAD_TO_64 */
+    0, 0, 2, 0xFF, 0, 0, 0, 0, g_pipes, 0
 };
 static WDU_INTERFACE g_iface = {
-    &g_altset, 0,   /* pAlternateSettings + pad */
-    1,              /* dwNumAltSettings */
-    &g_altset, 0    /* pActiveAltSetting + pad */
+    &g_altset, 0, 1, &g_altset, 0
 };
 static WDU_CONFIGURATION_DESCRIPTOR g_cfgdesc = {
     9, 2, sizeof(WDU_CONFIGURATION_DESCRIPTOR), 1, 1, 0, 0x80, 250
@@ -354,8 +346,15 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         wlog("  WDU_Init (real) -> 0x%08lX real_handle=%p",
              (unsigned long)r, real_handle);
         if (r == 0 && real_handle) {
-            /* SUCCESS — store real handle, fire fake attach (with NULL device info
-         to avoid layout mismatch crash). WinOLS uses real handle for WDU_Transfer */
+            /* WDU_Init succeeded with real wdapi1660, but the handle is WD16-format
+               and incompatible with WinOLS compiled for WD11. Fall through to fake mode
+               which uses WD11-compatible fake handle. Store real handle for WDU_Transfer. */
+            wlog("  WDU_Init real SUCCESS (handle=%p) but WD16/WD11 compat issue — using fake mode", real_handle);
+            g_attach_handle = NULL;  /* force fake mode to avoid WD11/WD16 crash */
+            /* Fall through to fake mode below */
+        }
+        if (0 && r == 0 && real_handle) {
+            /* DISABLED: real handle causes WD11/WD16 incompatibility crash */
             if (phDriver) *phDriver = real_handle;
             wlog("  WDU_Init SUCCESS with real handle %p", real_handle);
             if (pEventTable) {
@@ -385,8 +384,8 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
     /* Build fake device structures at runtime (can't use static init with ptrs) */
     g_config.Descriptor      = g_cfgdesc;
-    g_config.dwNumInterfaces = 1;
     g_config.pInterfaces     = &g_iface;
+    g_config.dwNumInterfaces = 1;
     memset(&g_fake_device, 0, sizeof(g_fake_device));
     g_fake_device.Descriptor.bLength            = 18;
     g_fake_device.Descriptor.bDescriptorType    = 1;
@@ -399,16 +398,8 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     g_fake_device.pConfigs       = &g_config;
     g_fake_device.pActiveConfig  = &g_config;
     /* Fill all WD_MAXDEVICES entries */
-    for (int i = 0; i < WD_MAXDEVICES; i++) {
+    for (int i = 0; i < WD_MAXDEVICES; i++)
         g_fake_device.pActiveInterface[i] = &g_altset;
-        g_fake_device._pad_iface[i] = 0;
-    }
-    /* Initialize Pipe0 (default control pipe) */
-    g_fake_device.Pipe0.dwNumber = 0;
-    g_fake_device.Pipe0.dwMaximumPacketSize = 64;
-    g_fake_device.Pipe0.type = 0;       /* WDU_PIPE_TYPE_CONTROL */
-    g_fake_device.Pipe0.direction = 3;  /* WDU_DIR_IN_OUT */
-    g_fake_device.Pipe0.dwInterval = 0;
 
     /* Call pfDeviceAttach after a short delay on a thread.
        500ms gives WinOLS enough time to finish WDU_Init processing.
