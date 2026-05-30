@@ -1,0 +1,56 @@
+[Version]
+Signature="$CHICAGO$"
+Provider=%jun%
+DriverVer=05/30/2026,16.6.0.0
+Class=Jungo
+ClassGuid={c671678c-82c1-43f3-d700-0049433e9a4b}
+
+[Manufacturer]
+%Mfg%=DeviceList,NTx86,NTamd64,NTARM64
+
+[DeviceList.NTx86]
+"OLS300 Roadrunner Bridge"=Install, USB\VID_0547&PID_3000
+
+[DeviceList.NTamd64]
+"OLS300 Roadrunner Bridge"=Install, USB\VID_0547&PID_3000
+
+[DeviceList.NTARM64]
+"OLS300 Roadrunner Bridge"=Install, USB\VID_0547&PID_3000
+
+[Install.NT]
+CopyFiles=FilesToCopy
+AddReg=UpdateRegistry
+
+[FilesToCopy]
+
+[ClassInstall32]
+AddReg=UpdateRegistry
+
+[UpdateRegistry]
+HKR,,,,Jungo Connectivity
+HKR,,Icon,,-5
+HKR,,DevLoader,,*ntkern
+HKR,,NTMPDriver,,windrvr1660.sys
+
+[ControlFlags]
+ExcludeFromSelect=*
+
+[Install.NT.Services]
+Addservice=WinDriver1660,0x00000002,Service_Info
+
+[Service_Info]
+ServiceType=1
+StartType=3
+ErrorControl=1
+ServiceBinary=%10%\System32\Drivers\windrvr1660.sys
+
+[SourceDisksFiles]
+[SourceDisksNames]
+1="Jungo Installation Disk",,
+
+[DestinationDirs]
+DefaultDestDir=10,System32\Drivers
+
+[Strings]
+jun="Jungo Connectivity LTD."
+Mfg="Jungo Connectivity"
