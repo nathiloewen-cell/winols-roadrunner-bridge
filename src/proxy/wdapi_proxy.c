@@ -123,44 +123,53 @@ typedef struct {
     DWORD fOK;
 } WD_TRANSFER;
 
-/* ── Vectored Exception Handler: intercept NULL-write crash ─────────── */
-static BYTE g_safe_write_buf[4096];
+/* ── Vectored Exception Handler ──────────────────────────────────────── */
+static BYTE  g_safe_write_buf[4096];
+static DWORD g_veh_depth = 0;   /* re-entry guard */
 
 static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
-    if (!pEx || !pEx->ExceptionRecord || !pEx->ContextRecord)
+    /* Re-entry guard: VirtualQuery or wlog can trigger exceptions */
+    if (InterlockedIncrement((LONG*)&g_veh_depth) > 1) {
+        InterlockedDecrement((LONG*)&g_veh_depth);
         return EXCEPTION_CONTINUE_SEARCH;
-    if (pEx->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
-        return EXCEPTION_CONTINUE_SEARCH;
-    DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
-    DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
-    /* Catch writes to: NULL/guard range, kernel space, OR any uncommitted page */
-    BOOL is_bad = (op == 1);
-    if (is_bad && fault >= 0x10000 && fault < 0x80000000) {
-        /* Use VirtualQuery to check if fault address is actually accessible */
-        MEMORY_BASIC_INFORMATION mbi = {0};
-        if (VirtualQuery((void*)(uintptr_t)fault, &mbi, sizeof(mbi)) &&
-            mbi.State != MEM_COMMIT) {
-            is_bad = TRUE;  /* uncommitted page — not safe to write */
-        } else {
-            is_bad = FALSE; /* page is committed and accessible */
+    }
+
+    LONG ret = EXCEPTION_CONTINUE_SEARCH;
+    if (pEx && pEx->ExceptionRecord && pEx->ContextRecord &&
+        pEx->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+
+        DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
+        DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
+
+        BOOL is_bad = (op == 1) && (fault < 0x10000 || fault >= 0x80000000);
+
+        /* Also check uncommitted pages in normal user range */
+        if (!is_bad && op == 1 && fault >= 0x10000 && fault < 0x80000000) {
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((void*)(uintptr_t)fault, &mbi, sizeof(mbi)) &&
+                mbi.State != MEM_COMMIT)
+                is_bad = TRUE;
+        }
+
+        if (is_bad) {
+            CONTEXT* ctx = pEx->ContextRecord;
+            DWORD safe   = (DWORD)(uintptr_t)g_safe_write_buf;
+            /* Only log if log is already initialized to avoid recursion */
+            if (g_log)
+                wlog("VEH: bad write EIP=0x%08lX fault=0x%08lX",
+                     (unsigned long)pEx->ExceptionRecord->ExceptionAddress,
+                     (unsigned long)fault);
+            if (ctx->Eax == fault || ctx->Eax < 0x10000 || ctx->Eax >= 0x80000000) ctx->Eax = safe;
+            if (ctx->Ebx == fault || ctx->Ebx < 0x10000 || ctx->Ebx >= 0x80000000) ctx->Ebx = safe;
+            if (ctx->Ecx == fault || ctx->Ecx < 0x10000 || ctx->Ecx >= 0x80000000) ctx->Ecx = safe;
+            if (ctx->Edx == fault || ctx->Edx < 0x10000 || ctx->Edx >= 0x80000000) ctx->Edx = safe;
+            if (ctx->Esi == fault || ctx->Esi < 0x10000 || ctx->Esi >= 0x80000000) ctx->Esi = safe;
+            if (ctx->Edi == fault || ctx->Edi < 0x10000 || ctx->Edi >= 0x80000000) ctx->Edi = safe;
+            ret = EXCEPTION_CONTINUE_EXECUTION;
         }
     }
-    if (is_bad) {
-        CONTEXT* ctx = pEx->ContextRecord;
-        DWORD safe   = (DWORD)(uintptr_t)g_safe_write_buf;
-        wlog("VEH: bad write at EIP=0x%08lX fault=0x%08lX — redirecting",
-             (unsigned long)pEx->ExceptionRecord->ExceptionAddress,
-             (unsigned long)fault);
-        /* Redirect any register pointing to the bad address */
-        if (ctx->Eax == fault || ctx->Eax < 0x10000 || ctx->Eax >= 0x80000000) ctx->Eax = safe;
-        if (ctx->Ebx == fault || ctx->Ebx < 0x10000 || ctx->Ebx >= 0x80000000) ctx->Ebx = safe;
-        if (ctx->Ecx == fault || ctx->Ecx < 0x10000 || ctx->Ecx >= 0x80000000) ctx->Ecx = safe;
-        if (ctx->Edx == fault || ctx->Edx < 0x10000 || ctx->Edx >= 0x80000000) ctx->Edx = safe;
-        if (ctx->Esi == fault || ctx->Esi < 0x10000 || ctx->Esi >= 0x80000000) ctx->Esi = safe;
-        if (ctx->Edi == fault || ctx->Edi < 0x10000 || ctx->Edi >= 0x80000000) ctx->Edi = safe;
-        return EXCEPTION_CONTINUE_EXECUTION;
-    }
-    return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedDecrement((LONG*)&g_veh_depth);
+    return ret;
 }
 
 /* ── DLL Entry ───────────────────────────────────────────────────────── */
