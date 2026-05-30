@@ -243,6 +243,11 @@ static WDU_CONFIGURATION_DESCRIPTOR g_cfgdesc = {
 static WDU_CONFIGURATION g_config;   /* initialized in WDU_Init */
 static WDU_DEVICE        g_fake_device;
 
+/* Forward declarations for async attach */
+static DWORD WINAPI attach_thread(LPVOID param);
+static WDU_ATTACH_CALLBACK g_attach_cb       = NULL;
+static PVOID               g_attach_userdata = NULL;
+
 /* ── WDU_Init — fake success + trigger attach callback ──────────────── */
 __declspec(dllexport)
 DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
@@ -277,25 +282,30 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     for (int i = 0; i < WD_MAXDEVICES; i++)
         g_fake_device.pActiveInterface[i] = &g_altset;
 
-    /* Call WinOLS device-attach callback so it thinks OLS300 is connected.
-       This makes 'Load/Disconnect' active and triggers WDU_Transfer calls. */
+    /* ASYNC: call pfDeviceAttach from a worker thread 200ms after WDU_Init
+       returns. Calling it synchronously (from inside WDU_Init) means WinOLS
+       hasn't finished its own initialization yet, so it returns 0 (reject).
+       Giving WinOLS 200ms to complete init lets the callback succeed. */
     if (pEventTable) {
         WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
         if (tbl->pfDeviceAttach) {
-            /* Pass NULL for device info first — if WinOLS only needs the
-               handle, this avoids struct layout mismatches entirely.      */
-            wlog("  Calling pfDeviceAttach(handle=%p, device=%p, userData=%p)",
-                 FAKE_DEVICE_HANDLE, &g_fake_device, tbl->pUserData);
-            /* Pass real device struct — WinOLS checks it before accepting */
-            wlog("  pfDeviceAttach with real device struct (WD_MAXDEVICES=%d)", WD_MAXDEVICES);
-            BOOL ok = tbl->pfDeviceAttach(FAKE_DEVICE_HANDLE,
-                                          &g_fake_device,
-                                          tbl->pUserData);
-            wlog("  pfDeviceAttach returned %d", ok);
-        } else {
-            wlog("  WARNING: pfDeviceAttach is NULL");
+            g_attach_cb       = tbl->pfDeviceAttach;
+            g_attach_userdata = tbl->pUserData;
+            wlog("  Scheduling async pfDeviceAttach (200ms delay)...");
+            CreateThread(NULL, 0, attach_thread, NULL, 0, NULL);
         }
     }
+    return 0;
+}
+
+static DWORD WINAPI attach_thread(LPVOID param) {
+    (void)param;
+    Sleep(200);
+    if (!g_attach_cb) return 0;
+    wlog("[async] pfDeviceAttach(handle=%p device=%p userData=%p)",
+         FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
+    BOOL ok = g_attach_cb(FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
+    wlog("[async] pfDeviceAttach returned %d", ok);
     return 0;
 }
 
@@ -399,84 +409,56 @@ DWORD __cdecl WDU_StreamGetStatus(void* hStream, BOOL* pfIsRunning,
 /* ── Device info functions ───────────────────────────────────────────── */
 __declspec(dllexport)
 DWORD __cdecl WDU_GetDeviceInfo(WDU_DEVICE_HANDLE hDevice, void** ppDeviceInfo) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, void**);
-    PFN fn = (PFN)get_real("WDU_GetDeviceInfo");
-    DWORD r = fn ? fn(hDevice, ppDeviceInfo) : 0xFFFFFFFF;
-    wlog("WDU_GetDeviceInfo(handle=%p) -> 0x%lX info=%p",
-         hDevice, (unsigned long)r, ppDeviceInfo ? *ppDeviceInfo : NULL);
-    return r;
+    /* Return our fake device — do NOT call real DLL (fake handle would crash) */
+    wlog("WDU_GetDeviceInfo(handle=%p) -> fake device", hDevice);
+    if (ppDeviceInfo) *ppDeviceInfo = &g_fake_device;
+    return 0;
 }
 
 __declspec(dllexport)
 void __cdecl WDU_PutDeviceInfo(void* pDeviceInfo) {
-    typedef void (__cdecl *PFN)(void*);
-    PFN fn = (PFN)get_real("WDU_PutDeviceInfo");
-    if (fn) fn(pDeviceInfo);
+    /* No-op — we own the fake device memory, don't free it */
+    (void)pDeviceInfo;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_GetDeviceAddr(WDU_DEVICE_HANDLE hDevice,
                                  DWORD* pdwBusNum, DWORD* pdwDevAddr) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD*, DWORD*);
-    PFN fn = (PFN)get_real("WDU_GetDeviceAddr");
-    DWORD r = fn ? fn(hDevice, pdwBusNum, pdwDevAddr) : 0xFFFFFFFF;
-    if (r == 0)
-        wlog("WDU_GetDeviceAddr -> bus=%lu addr=%lu",
-             pdwBusNum ? (unsigned long)*pdwBusNum : 0,
-             pdwDevAddr ? (unsigned long)*pdwDevAddr : 0);
-    return r;
+    wlog("WDU_GetDeviceAddr -> fake bus=0 addr=1");
+    if (pdwBusNum)  *pdwBusNum  = 0;
+    if (pdwDevAddr) *pdwDevAddr = 1;
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_ResetDevice(WDU_DEVICE_HANDLE hDevice, DWORD dwOptions) {
-    wlog("WDU_ResetDevice(%p options=0x%lX)", hDevice, (unsigned long)dwOptions);
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD);
-    PFN fn = (PFN)get_real("WDU_ResetDevice");
-    return fn ? fn(hDevice, dwOptions) : 0xFFFFFFFF;
+    wlog("WDU_ResetDevice -> fake OK");
+    return 0;
 }
 
 __declspec(dllexport)
-DWORD __cdecl WDU_ResetPipe(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD);
-    PFN fn = (PFN)get_real("WDU_ResetPipe");
-    return fn ? fn(hDevice, dwPipeNum) : 0xFFFFFFFF;
-}
+DWORD __cdecl WDU_ResetPipe(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum) { return 0; }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_SetInterface(WDU_DEVICE_HANDLE hDevice,
-                                DWORD dwInterfaceNum, DWORD dwAlternateSetting) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD, DWORD);
-    PFN fn = (PFN)get_real("WDU_SetInterface");
-    return fn ? fn(hDevice, dwInterfaceNum, dwAlternateSetting) : 0xFFFFFFFF;
-}
+                                DWORD dwInterfaceNum, DWORD dwAlternateSetting) { return 0; }
 
 __declspec(dllexport)
-DWORD __cdecl WDU_HaltTransfer(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD);
-    PFN fn = (PFN)get_real("WDU_HaltTransfer");
-    return fn ? fn(hDevice, dwPipeNum) : 0;
-}
+DWORD __cdecl WDU_HaltTransfer(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum) { return 0; }
 
 __declspec(dllexport)
-DWORD __cdecl WDU_SelectiveSuspend(WDU_DEVICE_HANDLE hDevice, DWORD dwOptions) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD);
-    PFN fn = (PFN)get_real("WDU_SelectiveSuspend");
-    return fn ? fn(hDevice, dwOptions) : 0;
-}
+DWORD __cdecl WDU_SelectiveSuspend(WDU_DEVICE_HANDLE hDevice, DWORD dwOptions) { return 0; }
 
 __declspec(dllexport)
-DWORD __cdecl WDU_Wakeup(WDU_DEVICE_HANDLE hDevice, DWORD dwOptions) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD);
-    PFN fn = (PFN)get_real("WDU_Wakeup");
-    return fn ? fn(hDevice, dwOptions) : 0;
-}
+DWORD __cdecl WDU_Wakeup(WDU_DEVICE_HANDLE hDevice, DWORD dwOptions) { return 0; }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_GetLangIDs(WDU_DEVICE_HANDLE hDevice, BYTE* pbNumSupportedLangIDs,
                               WORD* pLangIDs, DWORD dwLangIDsSize) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,BYTE*,WORD*,DWORD);
-    PFN fn = (PFN)get_real("WDU_GetLangIDs");
-    return fn ? fn(hDevice, pbNumSupportedLangIDs, pLangIDs, dwLangIDsSize) : 0;
+    /* Return English (0x0409) as supported language */
+    if (pbNumSupportedLangIDs) *pbNumSupportedLangIDs = 1;
+    if (pLangIDs && dwLangIDsSize >= 2) pLangIDs[0] = 0x0409;
+    return 0;
 }
 
 __declspec(dllexport)
