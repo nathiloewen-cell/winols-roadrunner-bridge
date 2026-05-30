@@ -305,6 +305,7 @@ static WDU_DEVICE        g_fake_device;
 static DWORD WINAPI attach_thread(LPVOID param);
 static WDU_ATTACH_CALLBACK g_attach_cb       = NULL;
 static PVOID               g_attach_userdata = NULL;
+static WDU_DEVICE_HANDLE   g_attach_handle   = NULL; /* real or fake handle */
 
 /* ── WDU_Init — let REAL wdapi handle device detection via WinUSB ────── */
 __declspec(dllexport)
@@ -326,16 +327,36 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     PFN_INIT real_init = (PFN_INIT)get_real("WDU_Init");
 
     if (real_open && real_init) {
-        /* Use WinOLS's own WinDriver license (works with wdapi1100 + windrvr6) */
+        /* Try WinOLS license first, then demo license */
         DWORD open_r = real_open(0, sLicense);
-        wlog("  WDC_DriverOpen (WinOLS license) -> 0x%08lX", (unsigned long)open_r);
+        if (open_r != 0) open_r = real_open(0, "12345abcde1234.license");
+        wlog("  WDC_DriverOpen -> 0x%08lX", (unsigned long)open_r);
 
-        DWORD r = real_init(phDriver, pMatchTables, dwNumMatchTables,
-                            pEventTable, sLicense, dwOptions);
-        wlog("  WDU_Init (real, demo lic) -> 0x%08lX handle=%p",
-             (unsigned long)r, phDriver ? *phDriver : NULL);
-        if (r == 0) {
-            wlog("  WDU_Init SUCCESS! Native pfDeviceAttach will fire when device is found.");
+        WDU_DRIVER_HANDLE real_handle = NULL;
+        DWORD r = real_init(&real_handle, pMatchTables, dwNumMatchTables,
+                            pEventTable, "12345abcde1234.license", dwOptions);
+        wlog("  WDU_Init (real) -> 0x%08lX real_handle=%p",
+             (unsigned long)r, real_handle);
+        if (r == 0 && real_handle) {
+            /* SUCCESS — pass real wdapi handle to pfDeviceAttach */
+            if (phDriver) *phDriver = real_handle;
+            wlog("  WDU_Init SUCCESS with real handle — passing to pfDeviceAttach");
+            /* Schedule pfDeviceAttach with REAL handle */
+            if (pEventTable) {
+                WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
+                if (tbl->pfDeviceAttach) {
+                    g_attach_cb       = tbl->pfDeviceAttach;
+                    g_attach_userdata = tbl->pUserData;
+                    g_attach_handle   = real_handle;  /* real wdapi handle! */
+                    wlog("  Scheduling pfDeviceAttach with REAL handle in 500ms");
+                    HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
+                                             CREATE_SUSPENDED, NULL);
+                    if (ht) {
+                        SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
+                        ResumeThread(ht); CloseHandle(ht);
+                    }
+                }
+            }
             return r;
         }
         wlog("  WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
@@ -343,6 +364,7 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
     /* Fallback: fake mode if real wdapi can't find device */
     if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
+    g_attach_handle = NULL;  /* use fake handle in fallback mode */
     wlog("  WDU_Init -> fake fallback");
 
     /* Build fake device structures at runtime (can't use static init with ptrs) */
@@ -387,11 +409,12 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
 static DWORD WINAPI attach_thread(LPVOID param) {
     (void)param;
-    Sleep(500);  /* longer delay — let WinOLS fully initialize */
+    Sleep(500);
     if (!g_attach_cb) return 0;
-    wlog("[attach] pfDeviceAttach(handle=%p device=%p userData=%p)",
-         FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
-    BOOL ok = g_attach_cb(FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
+    WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
+    wlog("[attach] pfDeviceAttach(handle=%p real=%d device=%p userData=%p)",
+         use_handle, (g_attach_handle != NULL), &g_fake_device, g_attach_userdata);
+    BOOL ok = g_attach_cb(use_handle, &g_fake_device, g_attach_userdata);
     wlog("[attach] pfDeviceAttach returned %d", ok);
     return 0;
 }
