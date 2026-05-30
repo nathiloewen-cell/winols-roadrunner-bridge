@@ -486,8 +486,36 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
     if (!fRead && pBuffer && dwBytes > 0)
         log_hex("WDU_Transfer TX", pBuffer, dwBytes);
 
-    /* Forward to real wdapi1660 — pass hDevice directly (may be real device handle
-       from WinDriver's native pfDeviceAttach, or fake handle = will fail gracefully) */
+    /* Intercept pipe 0x86 (Bulk IN) reads — these are OLS300 identification requests.
+       The OLS300 responds with its firmware info. We fake this response so WinOLS
+       accepts the connection. Based on reverse engineering: WinOLS stores "OLS821"
+       as module identifier; return minimal OLS identification response. */
+    if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16) {
+        /* OLS300 identification response (structure discovered from reverse engineering):
+           Bytes 0-7: model string "OLS821\0\0"  (or similar firmware version)
+           Bytes 8-N: firmware data, status flags, capabilities
+           Return enough data to make WinOLS accept the module. */
+        memset(pBuffer, 0, dwBytes < 448 ? dwBytes : 448);
+        BYTE* b = (BYTE*)pBuffer;
+        /* Module type identifier */
+        b[0] = 0x4F; b[1] = 0x4C; b[2] = 0x53;  /* "OLS" */
+        b[3] = 0x38; b[4] = 0x32; b[5] = 0x31;  /* "821" */
+        b[6] = 0x00; b[7] = 0x00;                /* null */
+        /* Status: connected, ready */
+        b[8] = 0x01;  /* status = OK */
+        /* Firmware version: 1.0 */
+        b[10] = 0x01; b[11] = 0x00;
+        if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes < 448 ? dwBytes : 448;
+        wlog("WDU_Transfer FAKE OLS300 ID response (pipe=0x%lX, %lu bytes)",
+             (unsigned long)dwPipeNum, (unsigned long)*pdwBytesTransferred);
+        return 0;  /* WD_STATUS_SUCCESS */
+    }
+
+    /* Log other transfers for protocol discovery */
+    if (!fRead && pBuffer && dwBytes > 0)
+        log_hex("WDU_Transfer TX (OLS300 cmd)", pBuffer, dwBytes);
+
+    /* Forward to real wdapi1660 for non-read transfers */
     if (get_real("WDU_Transfer")) {
         typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,DWORD,DWORD,
                                       void*,DWORD,DWORD*,BYTE*,DWORD);
