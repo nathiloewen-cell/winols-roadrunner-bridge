@@ -311,9 +311,10 @@ static WDU_DEVICE        g_fake_device;
 
 /* Forward declarations for async attach */
 static DWORD WINAPI attach_thread(LPVOID param);
-static WDU_ATTACH_CALLBACK g_attach_cb       = NULL;
-static PVOID               g_attach_userdata = NULL;
-static WDU_DEVICE_HANDLE   g_attach_handle   = NULL; /* real or fake handle */
+static WDU_ATTACH_CALLBACK g_attach_cb         = NULL;
+static PVOID               g_attach_userdata   = NULL;
+static WDU_DEVICE_HANDLE   g_attach_handle     = NULL;
+static WDU_DRIVER_HANDLE   g_real_driver_handle = NULL; /* real wdapi1660 handle */
 
 /* ── WDU_Init — let REAL wdapi handle device detection via WinUSB ────── */
 __declspec(dllexport)
@@ -353,8 +354,12 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
             g_attach_handle = NULL;  /* force fake mode to avoid WD11/WD16 crash */
             /* Fall through to fake mode below */
         }
-        if (0 && r == 0 && real_handle) {
-            /* DISABLED: real handle causes WD11/WD16 incompatibility crash */
+        if (r == 0 && real_handle) {
+            /* WDU_Init succeeded! Store real handle for WDU_Transfer forwarding.
+               WinOLS gets fake handle (no WD16/WD11 crash), but WDU_Transfer
+               uses the real handle → Roadrunner receives actual OLS300 commands! */
+            g_real_driver_handle = real_handle;
+            wlog("  Real handle stored for WDU_Transfer forwarding: %p", real_handle);
             if (phDriver) *phDriver = real_handle;
             wlog("  WDU_Init SUCCESS with real handle %p", real_handle);
             if (pEventTable) {
@@ -483,9 +488,24 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                             DWORD dwOptions, void* pBuffer,
                             DWORD dwBytes, DWORD* pdwBytesTransferred,
                             BYTE* pSetupPacket, DWORD dwTimeout) {
-    /* TODO S5: translate OLS300 protocol to Roadrunner MoatesWare */
     if (!fRead && pBuffer && dwBytes > 0)
-        log_hex("WDU_Transfer TX (OLS300 cmd)", pBuffer, dwBytes);
+        log_hex("WDU_Transfer TX", pBuffer, dwBytes);
+
+    /* Forward to real wdapi1660 if we have a real driver handle */
+    if (g_real_driver_handle && get_real("WDU_Transfer")) {
+        typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,DWORD,DWORD,
+                                      void*,DWORD,DWORD*,BYTE*,DWORD);
+        PFN fn = (PFN)get_real("WDU_Transfer");
+        DWORD r = fn(g_real_driver_handle, dwPipeNum, fRead, dwOptions,
+                     pBuffer, dwBytes, pdwBytesTransferred, pSetupPacket, dwTimeout);
+        wlog("  WDU_Transfer (real) pipe=%lu read=%lu bytes=%lu -> 0x%lX got=%lu",
+             (unsigned long)dwPipeNum, (unsigned long)fRead,
+             (unsigned long)dwBytes, (unsigned long)r,
+             pdwBytesTransferred ? (unsigned long)*pdwBytesTransferred : 0);
+        if (fRead && pBuffer && pdwBytesTransferred && *pdwBytesTransferred > 0)
+            log_hex("WDU_Transfer RX", pBuffer, *pdwBytesTransferred);
+        return r;
+    }
     if (pdwBytesTransferred) *pdwBytesTransferred = 0;
     return 0;
 }
@@ -495,10 +515,22 @@ DWORD __cdecl WDU_TransferBulk(WDU_DEVICE_HANDLE hDevice,
                                  DWORD dwPipeNum, void* pBuffer,
                                  DWORD* pdwBytes, DWORD dwOptions,
                                  DWORD dwTimeout) {
-    /* TODO S6: translate OLS300 bulk transfer to Roadrunner MoatesWare */
     DWORD sz = pdwBytes ? *pdwBytes : 0;
     if (pBuffer && sz > 0)
-        log_hex("WDU_TransferBulk TX (OLS300 cmd)", pBuffer, sz);
+        log_hex("WDU_TransferBulk TX", pBuffer, sz);
+
+    /* Forward to real wdapi1660 */
+    if (g_real_driver_handle && get_real("WDU_TransferBulk")) {
+        typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,void*,DWORD*,DWORD,DWORD);
+        PFN fn = (PFN)get_real("WDU_TransferBulk");
+        DWORD r = fn(g_real_driver_handle, dwPipeNum, pBuffer, pdwBytes, dwOptions, dwTimeout);
+        wlog("  WDU_TransferBulk (real) pipe=%lu -> 0x%lX got=%lu",
+             (unsigned long)dwPipeNum, (unsigned long)r,
+             pdwBytes ? (unsigned long)*pdwBytes : 0);
+        if (pBuffer && pdwBytes && *pdwBytes > 0)
+            log_hex("WDU_TransferBulk RX", pBuffer, *pdwBytes);
+        return r;
+    }
     if (pdwBytes) *pdwBytes = 0;
     return 0;
 }
