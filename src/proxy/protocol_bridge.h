@@ -1,21 +1,23 @@
 #pragma once
 /*
- * protocol_bridge.h — Batronix ↔ MoatesWare protocol translation (S5/S6/S7).
+ * protocol_bridge.h — OLS300 ↔ MoatesWare protocol translation (S5/S6/S7).
  *
- * WinOLS sends Batronix-protocol bytes via FT_Write/FT_Read.
+ * CORRECTION: WinOLS communicates with the OLS300 chip simulator (not Batronix).
+ * Batronix is an EEPROM programmer — completely unrelated to chip simulation.
+ *
  * This module:
- *  1. Intercepts the raw FT_Write bytes from WinOLS
- *  2. Identifies the Batronix command (read/write/trace/init)
- *  3. Executes the equivalent MoatesWare operation on the Roadrunner
- *  4. Returns the Batronix-format response to WinOLS via FT_Read
+ *  1. Intercepts FT_Write bytes from WinOLS (OLS300 protocol)
+ *  2. Translates OLS300 commands to MoatesWare commands for the Roadrunner
+ *  3. Returns OLS300-format responses to WinOLS via FT_Read
  *
- * Phase approach:
- *  - PHASE_LOG: passthrough + full logging (current, S3)
- *  - PHASE_BRIDGE: active translation (S5/S6/S7)
+ * OLS300 protocol discovery:
+ *  - Run WinOLS with this proxy installed and Roadrunner connected
+ *  - Check %TEMP%\winols_bridge.log for FT_Write/FT_Read hex dumps
+ *  - The log reveals exact OLS300 command bytes
+ *  - Update CMD_OLS300_* constants below once log data is available
  *
- * The exact Batronix command bytes will be refined once the logging
- * proxy has captured a real WinOLS session.  The values below are
- * educated guesses based on common EPROM programmer protocols.
+ * Current state: PHASE_LOG (passthrough + logging only)
+ * After first real WinOLS session: switch to PHASE_BRIDGE
  */
 
 #include <windows.h>
@@ -60,23 +62,28 @@ static inline DWORD resp_pop(BYTE* out, DWORD max_len) {
 }
 
 /*
- * ── Batronix command recognition ────────────────────────────────────────
+ * ── OLS300 command bytes ─────────────────────────────────────────────────
  *
- * These values are PLACEHOLDER estimates.  The logging proxy will
- * produce a winols_bridge.log with the exact bytes WinOLS sends.
- * Update these constants once log data is available.
+ * UNKNOWN — to be discovered via logging proxy.
+ * Run WinOLS with proxy + Roadrunner connected, then read:
+ *   %TEMP%\winols_bridge.log
+ * The FT_Write TX hex dumps will show exact OLS300 command bytes.
  *
- * Typical Batronix framing (based on similar EPROM programmer protocols):
- *   [STX=0x02] [CMD] [ADDR_HI] [ADDR_LO] [SIZE_HI] [SIZE_LO] [CS]
+ * Placeholder values — DO NOT use for translation until confirmed.
  */
+#define OLS300_CMD_UNKNOWN  0x00   /* placeholder — update from log */
+#define OLS300_ACK          0x06   /* standard ACK (likely correct) */
+#define OLS300_NAK          0x15   /* standard NAK (likely correct) */
+
+/* Keep Batronix names as aliases during transition for compile compatibility */
 #define BAT_STX         0x02
-#define BAT_CMD_READ    0x52  /* 'R' */
-#define BAT_CMD_WRITE   0x57  /* 'W' */
-#define BAT_CMD_ERASE   0x45  /* 'E' */
-#define BAT_CMD_VERIFY  0x56  /* 'V' */
-#define BAT_CMD_INIT    0x49  /* 'I' — device init/identify */
-#define BAT_CMD_TRACE   0x54  /* 'T' — trace start */
-#define BAT_ACK         0x06
+#define BAT_CMD_READ    0x52
+#define BAT_CMD_WRITE   0x57
+#define BAT_CMD_ERASE   0x45
+#define BAT_CMD_VERIFY  0x56
+#define BAT_CMD_INIT    0x49
+#define BAT_CMD_TRACE   0x54
+#define BAT_ACK         OLS300_ACK
 
 /* ── Handle a FT_Write call from WinOLS ─────────────────────────────── */
 /*

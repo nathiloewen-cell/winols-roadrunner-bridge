@@ -1,18 +1,25 @@
 #pragma once
 /*
- * device_spoof.h — Roadrunner → Batronix device identity spoof (S4).
+ * device_spoof.h — Roadrunner → OLS300 device identity spoof (S4, corrected).
  *
- * WinOLS / BSL100.dll look for a Batronix device when enumerating FTDI
- * hardware. This module intercepts FT_CreateDeviceInfoList,
- * FT_GetDeviceInfoList, and FT_OpenEx to replace the Roadrunner's
- * real identity (VID=0403, PID=B471, desc="DataLoader") with a
- * Batronix-compatible one.
+ * CORRECTION: Batronix is an EEPROM programmer, NOT a chip simulator.
+ * WinOLS uses the OLS300 as its native chip simulator (EPROM emulator).
+ * The Roadrunner (Moates) is the equivalent of the OLS300.
  *
- * Known Batronix description strings (from Batronix.pep / WinOLS source):
- *   "Prog-Express 16"   — Batronix BX32 programmer (most common)
- *   "Prog-Express 32"
- *   "Batronix"
- * We default to "Prog-Express 16" which matches WinOLS 2.x expectations.
+ * WinOLS identifies the OLS300:
+ *  - Via standard FTDI USB (VID=0403, PID=6001)
+ *  - Matched by SERIAL NUMBER entered in Hardware → Simulator → Properties
+ *  - Device description is generic ("FT232R USB UART" or similar)
+ *
+ * Bridge strategy:
+ *  1. Register Roadrunner's custom PID (B471) with D2XX so WinOLS sees it
+ *  2. WinOLS enumerates FTDI devices → finds Roadrunner
+ *  3. User enters Roadrunner's serial number in Simulator Properties
+ *  4. WinOLS opens by serial → proxy intercepts → bridge translates
+ *     OLS300 protocol commands to MoatesWare commands
+ *
+ * OLS300 protocol: discovered empirically via logging proxy (S3).
+ * Run WinOLS with proxy installed and check %TEMP%\winols_bridge.log.
  */
 
 #include "ftd2xx_proxy.h"
@@ -24,10 +31,16 @@
 #define RR_DEVICE_ID   ((RR_VID << 16) | RR_PID)   /* 0x0403B471 */
 #define RR_DESCRIPTION "DataLoader"
 
-/* Batronix spoofed identity presented to WinOLS */
-#define SPOOF_DESCRIPTION  "Prog-Express 16"
-#define SPOOF_SERIAL       "BX000001"
-#define SPOOF_DEVICE_ID    0x04036001   /* Standard FTDI FT232R ID */
+/*
+ * OLS300 identity — WinOLS's native simulator (what we spoof TO).
+ * PID 6001 = standard FTDI FT232R (OLS300 uses standard FTDI chip).
+ * Serial number is user-configurable in WinOLS Simulator Properties —
+ * set it to the Roadrunner's actual FTDI serial number.
+ */
+#define SPOOF_DESCRIPTION  "FT232R USB UART"   /* OLS300 generic FTDI desc  */
+#define SPOOF_SERIAL       ""                   /* Keep real serial — user   */
+                                                /* must enter it in WinOLS   */
+#define SPOOF_DEVICE_ID    0x04036001           /* OLS300: standard FT232R   */
 
 /*
  * Returns TRUE if this device node represents the Roadrunner.
@@ -62,17 +75,23 @@ static inline void spoof_node(FT_DEVICE_LIST_INFO_NODE* node) {
  */
 static inline BOOL spoof_open_ex(PVOID arg, DWORD flags,
                                   const char** real_desc_out) {
-    if (flags != FT_OPEN_BY_DESCRIPTION) return FALSE;
-    const char* desc = (const char*)arg;
-    if (!desc) return FALSE;
-    /* If WinOLS is asking for the spoofed Batronix name, redirect */
-    if (strcmp(desc, SPOOF_DESCRIPTION) == 0 ||
-        strstr(desc, "Prog-Express") ||
-        strstr(desc, "Batronix")) {
-        log_write("SPOOF: FT_OpenEx('%s') -> redirected to Roadrunner '%s'",
-                  desc, RR_DESCRIPTION);
-        *real_desc_out = RR_DESCRIPTION;
-        return TRUE;
+    /*
+     * WinOLS opens the OLS300 by SERIAL NUMBER (FT_OPEN_BY_SERIAL_NUMBER),
+     * not by description. The serial number comes from the user's entry in
+     * Hardware → Simulator → Properties.
+     *
+     * We don't redirect here — the user configures the Roadrunner's real
+     * serial number in WinOLS, so FT_OpenEx will already use the right serial.
+     * The proxy just needs to ensure the Roadrunner is visible (PID registered).
+     *
+     * Log the open attempt so we can verify the serial number in the log file.
+     */
+    if (flags == FT_OPEN_BY_SERIAL_NUMBER) {
+        log_write("SPOOF: FT_OpenEx by serial='%s' (OLS300 slot -> Roadrunner)",
+                  (const char*)arg);
+    } else if (flags == FT_OPEN_BY_DESCRIPTION) {
+        log_write("SPOOF: FT_OpenEx by desc='%s'", (const char*)arg);
     }
-    return FALSE;
+    (void)real_desc_out;
+    return FALSE;   /* No redirect needed — serial number match handles it */
 }

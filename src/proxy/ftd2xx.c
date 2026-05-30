@@ -30,6 +30,15 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID reserved) {
             log_write("FATAL: could not load System32\\ftd2xx.dll");
         } else {
             log_write("Proxy loaded. Real ftd2xx.dll at %p", (void*)g_real_dll);
+            /*
+             * Register Roadrunner's custom PID (B471) with D2XX so
+             * FT_CreateDeviceInfoList returns it alongside PID_6001 devices.
+             * Without this, the Roadrunner is invisible to WinOLS.
+             */
+            if (real_FT_SetVIDPID) {
+                real_FT_SetVIDPID(0x0403, 0xB471);
+                log_write("Registered Roadrunner PID 0xB471 with D2XX");
+            }
         }
     } else if (reason == DLL_PROCESS_DETACH) {
         log_write("Proxy unloaded.");
