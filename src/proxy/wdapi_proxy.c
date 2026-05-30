@@ -95,6 +95,36 @@ static FARPROC get_real(const char* name) {
 #define REAL(name) ((PFN_##name)get_real(#name))
 #define DECL_PFN(ret, name, ...) typedef ret (__cdecl *PFN_##name)(__VA_ARGS__);
 
+/* ── OLS300 identification packet (448 bytes) ────────────────────────── */
+/* Loaded from C:\dev\winols-roadrunner-bridge\tools\id_packet.bin at startup.
+   If the file doesn't exist, uses the built-in placeholder.
+   The fuzzer writes different test patterns to id_packet.bin and restarts
+   WinOLS to test whether WinOLS accepts the identification.               */
+#define ID_PACKET_SIZE 448
+static BYTE g_id_packet[ID_PACKET_SIZE];
+
+static void load_id_packet(void) {
+    /* Initialize with built-in placeholder */
+    memset(g_id_packet, 0, ID_PACKET_SIZE);
+    g_id_packet[0x00] = 0x55;  /* sync byte 1 (from firmware 0x7C00) */
+    g_id_packet[0x01] = 0xAA;  /* sync byte 2 (from firmware 0x7C01) */
+    g_id_packet[0x08] = 0x01;  /* status = OK */
+    /* Try putting version string at offset 80 (0x50) */
+    if (ID_PACKET_SIZE > 86) {
+        g_id_packet[0x50] = 0x4F; g_id_packet[0x51] = 0x4C; g_id_packet[0x52] = 0x53;
+        g_id_packet[0x53] = 0x38; g_id_packet[0x54] = 0x32; g_id_packet[0x55] = 0x31;
+    }
+
+    /* Try to load from file (fuzzer writes here) */
+    FILE* f = NULL;
+    fopen_s(&f, "C:\\dev\\winols-roadrunner-bridge\\tools\\id_packet.bin", "rb");
+    if (f) {
+        size_t n = fread(g_id_packet, 1, ID_PACKET_SIZE, f);
+        fclose(f);
+        wlog("ID packet loaded from file (%zu bytes)", n);
+    }
+}
+
 /* ── WinDriver type definitions (minimal, for logging) ───────────────── */
 
 /* WDU_MATCH_TABLE — what WinOLS registers to find OLS300 */
@@ -179,6 +209,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         init_self_referencing(g_fake_device_data, 64);
         init_self_referencing(g_fake_stream_data,  64);
         AddVectoredExceptionHandler(1, veh_handler);
+        load_id_packet();
         log_init();
         /* Load real wdapi1100_real.dll — Roadrunner now has WinUSB driver
            so wdapi can find it natively. VEH handles any windrvr.sys init failures. */
@@ -486,44 +517,23 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
     if (!fRead && pBuffer && dwBytes > 0)
         log_hex("WDU_Transfer TX", pBuffer, dwBytes);
 
-    /* Intercept pipe 0x86 (Bulk IN) reads — these are OLS300 identification requests.
-       The OLS300 responds with its firmware info. We fake this response so WinOLS
-       accepts the connection. Based on reverse engineering: WinOLS stores "OLS821"
-       as module identifier; return minimal OLS identification response. */
-    /* Limit fake responses to avoid infinite loop hang */
-    static volatile LONG g_fake_read_count = 0;
-    LONG cnt = InterlockedIncrement(&g_fake_read_count);
-
-    if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16 && cnt <= 5) {
-        /* OLS300 identification response (structure discovered from reverse engineering):
-           Bytes 0-7: model string "OLS821\0\0"  (or similar firmware version)
+    /* Intercept pipe 0x86 (Bulk IN) reads — OLS300 identification/data stream.
+       Serve the g_id_packet buffer (448 bytes). Content is updated by Sprint 1
+       firmware analysis. Currently a placeholder; will be replaced with correct bytes. */
+    if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16) {
+        /* Serve g_id_packet (loaded from tools/id_packet.bin or built-in placeholder).
+           The fuzzer tests different byte patterns by writing to id_packet.bin.
            Bytes 8-N: firmware data, status flags, capabilities
            Return enough data to make WinOLS accept the module. */
-        memset(pBuffer, 0, dwBytes < 448 ? dwBytes : 448);
-        BYTE* b = (BYTE*)pBuffer;
-        /* From reverse engineering: OLS module struct stores "OLS821" at offset 0x50=80.
-           This comes from the WDU_Transfer init response. Try various locations. */
-        /* Try: offset 0 header */
-        b[0] = 0x01;  /* magic/version */
-        b[1] = 0x00;
-        /* offset 0x08 = 8: status */
-        b[8] = 0x01;
-        /* offset 0x10 = 16: type identifier */
-        b[16] = 0x03;  /* OLS300 type */
-        /* offset 0x50 = 80: firmware version string "OLS821" */
-        if ((int)dwBytes > 86) {
-            b[0x50] = 0x4F; b[0x51] = 0x4C; b[0x52] = 0x53;  /* OLS */
-            b[0x53] = 0x38; b[0x54] = 0x32; b[0x55] = 0x31;  /* 821 */
-        }
-        /* offset 0xD0 = 208: second copy */
-        if ((int)dwBytes > 214) {
-            b[0xD0] = 0x4F; b[0xD1] = 0x4C; b[0xD2] = 0x53;
-            b[0xD3] = 0x38; b[0xD4] = 0x32; b[0xD5] = 0x31;
-        }
-        if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes < 448 ? dwBytes : 448;
-        wlog("WDU_Transfer FAKE OLS300 ID response (pipe=0x%lX, %lu bytes)",
-             (unsigned long)dwPipeNum, (unsigned long)*pdwBytesTransferred);
-        return 0;  /* WD_STATUS_SUCCESS */
+        DWORD give = dwBytes < ID_PACKET_SIZE ? dwBytes : ID_PACKET_SIZE;
+        memcpy(pBuffer, g_id_packet, give);
+        if (give < dwBytes)
+            memset((BYTE*)pBuffer + give, 0, dwBytes - give);
+        if (pdwBytesTransferred) *pdwBytesTransferred = give;
+        wlog("WDU_Transfer ID packet (pipe=0x%lX, %lu bytes) first=[%02X %02X %02X %02X]",
+             (unsigned long)dwPipeNum, (unsigned long)give,
+             g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
+        return 0;
     }
 
     /* Log other transfers for protocol discovery */
