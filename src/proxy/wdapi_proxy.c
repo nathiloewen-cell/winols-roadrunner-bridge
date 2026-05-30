@@ -184,9 +184,19 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         init_self_referencing(g_fake_stream_data,  64);
         AddVectoredExceptionHandler(1, veh_handler);
         log_init();
-        /* Do NOT load wdapi1100_real.dll — it crashes at init without windrvr.sys.
-           All functions are implemented as stubs below. No real DLL needed. */
-        wlog("wdapi proxy loaded (standalone mode — no real DLL)");
+        /* Load real wdapi1100_real.dll — Roadrunner now has WinUSB driver
+           so wdapi can find it natively. VEH handles any windrvr.sys init failures. */
+        char path[MAX_PATH];
+        GetModuleFileNameA(NULL, path, MAX_PATH);
+        char* last = strrchr(path, '\\');
+        if (last)
+            strcpy_s(last+1, MAX_PATH-(last-path)-1, "wdapi1100_real.dll");
+        g_real = LoadLibraryA(path);
+        if (g_real) {
+            wlog("wdapi proxy loaded (REAL DLL mode — WinUSB device active)");
+        } else {
+            wlog("wdapi proxy loaded (standalone fallback — real DLL not found)");
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
         wlog("wdapi proxy unloaded");
         log_close();
@@ -296,7 +306,7 @@ static DWORD WINAPI attach_thread(LPVOID param);
 static WDU_ATTACH_CALLBACK g_attach_cb       = NULL;
 static PVOID               g_attach_userdata = NULL;
 
-/* ── WDU_Init — fake success + trigger attach callback ──────────────── */
+/* ── WDU_Init — let REAL wdapi handle device detection via WinUSB ────── */
 __declspec(dllexport)
 DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
                         WDU_MATCH_TABLE*   pMatchTables,
@@ -308,8 +318,25 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
          pMatchTables ? pMatchTables[0].wVendorId : 0,
          pMatchTables ? pMatchTables[0].wProductId : 0);
 
+    /* Try real wdapi first — it will find the Roadrunner via WinUSB */
+    typedef DWORD (__cdecl *PFN_INIT)(WDU_DRIVER_HANDLE*, WDU_MATCH_TABLE*,
+                                       DWORD, void*, const char*, DWORD);
+    PFN_INIT real_init = (PFN_INIT)get_real("WDU_Init");
+    if (real_init) {
+        DWORD r = real_init(phDriver, pMatchTables, dwNumMatchTables,
+                            pEventTable, sLicense, dwOptions);
+        wlog("  WDU_Init (real) -> 0x%08lX handle=%p",
+             (unsigned long)r, phDriver ? *phDriver : NULL);
+        if (r == 0 || (phDriver && *phDriver)) {
+            wlog("  Real WDU_Init succeeded — WinUSB device found!");
+            return r;
+        }
+        wlog("  Real WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
+    }
+
+    /* Fallback: fake mode if real wdapi can't find device */
     if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
-    wlog("  WDU_Init -> fake success, now triggering attach callback");
+    wlog("  WDU_Init -> fake fallback");
 
     /* Build fake device structures at runtime (can't use static init with ptrs) */
     g_config.Descriptor   = g_cfgdesc;
@@ -364,7 +391,7 @@ static DWORD WINAPI attach_thread(LPVOID param) {
 
 __declspec(dllexport)
 DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
-    wlog("WDU_Uninit -> fake OK (re-attach in 600ms)");
+    wlog("WDU_Uninit(handle=%p)", hDriver);
     /* After disconnect, re-trigger attach so WinOLS sees device reconnect.
        This simulates the OLS300 device being present persistently.         */
     if (g_attach_cb) {
@@ -614,8 +641,14 @@ __declspec(dllexport) DWORD __cdecl WDC_DriverClose(void) {
 }
 
 __declspec(dllexport) DWORD __cdecl WDC_Version(char* pVer, DWORD dwLen) {
-    /* Return fake version string */
+    wlog("WDC_Version called");
     if (pVer && dwLen > 10) strncpy_s(pVer, dwLen, "11.0.0", _TRUNCATE);
+    return 0;
+}
+
+/* ── Catch-all logger for WDC functions called by WinOLS ────────────── */
+__declspec(dllexport) DWORD __cdecl WDC_CallKerPlug_log(void* a, void* b) {
+    wlog("WDC_CallKerPlug called!");
     return 0;
 }
 
