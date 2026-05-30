@@ -364,7 +364,18 @@ static DWORD WINAPI attach_thread(LPVOID param) {
 
 __declspec(dllexport)
 DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
-    wlog("WDU_Uninit -> fake OK");
+    wlog("WDU_Uninit -> fake OK (re-attach in 600ms)");
+    /* After disconnect, re-trigger attach so WinOLS sees device reconnect.
+       This simulates the OLS300 device being present persistently.         */
+    if (g_attach_cb) {
+        HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
+                                 CREATE_SUSPENDED, NULL);
+        if (ht) {
+            SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
+            ResumeThread(ht);
+            CloseHandle(ht);
+        }
+    }
     return 0;
 }
 
