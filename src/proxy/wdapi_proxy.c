@@ -31,7 +31,8 @@ static void log_init(void) {
     char path[MAX_PATH];
     GetTempPathA(MAX_PATH, path);
     strcat_s(path, MAX_PATH, "winols_wdapi.log");
-    fopen_s(&g_log, path, "a");
+    /* _fsopen with _SH_DENYWR allows other processes to read while we write */
+    g_log = _fsopen(path, "a", 0x20 /* _SH_DENYWR */);
     InitializeCriticalSection(&g_cs);
     if (g_log) {
         fprintf(g_log, "\n=== wdapi1100 proxy loaded ===\n\n");
