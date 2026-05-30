@@ -133,18 +133,21 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
         return EXCEPTION_CONTINUE_SEARCH;
     DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
     DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
-    if (op == 1 && fault < 0x1000) {
+    /* Catch: write to NULL/low addresses AND write to kernel-space (>0x80000000) */
+    BOOL is_bad = (op == 1) && (fault < 0x10000 || fault >= 0x80000000);
+    if (is_bad) {
         CONTEXT* ctx = pEx->ContextRecord;
         DWORD safe   = (DWORD)(uintptr_t)g_safe_write_buf;
-        wlog("VEH: NULL write at EIP=0x%08lX fault=0x%08lX — redirecting",
+        wlog("VEH: bad write at EIP=0x%08lX fault=0x%08lX — redirecting",
              (unsigned long)pEx->ExceptionRecord->ExceptionAddress,
              (unsigned long)fault);
-        if (ctx->Eax < 0x1000) ctx->Eax = safe;
-        if (ctx->Ebx < 0x1000) ctx->Ebx = safe;
-        if (ctx->Ecx < 0x1000) ctx->Ecx = safe;
-        if (ctx->Edx < 0x1000) ctx->Edx = safe;
-        if (ctx->Esi < 0x1000) ctx->Esi = safe;
-        if (ctx->Edi < 0x1000) ctx->Edi = safe;
+        /* Redirect any register pointing to the bad address */
+        if (ctx->Eax == fault || ctx->Eax < 0x10000 || ctx->Eax >= 0x80000000) ctx->Eax = safe;
+        if (ctx->Ebx == fault || ctx->Ebx < 0x10000 || ctx->Ebx >= 0x80000000) ctx->Ebx = safe;
+        if (ctx->Ecx == fault || ctx->Ecx < 0x10000 || ctx->Ecx >= 0x80000000) ctx->Ecx = safe;
+        if (ctx->Edx == fault || ctx->Edx < 0x10000 || ctx->Edx >= 0x80000000) ctx->Edx = safe;
+        if (ctx->Esi == fault || ctx->Esi < 0x10000 || ctx->Esi >= 0x80000000) ctx->Esi = safe;
+        if (ctx->Edi == fault || ctx->Edi < 0x10000 || ctx->Edi >= 0x80000000) ctx->Edi = safe;
         return EXCEPTION_CONTINUE_EXECUTION;
     }
     return EXCEPTION_CONTINUE_SEARCH;
