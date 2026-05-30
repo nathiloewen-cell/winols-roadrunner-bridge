@@ -15,10 +15,12 @@ Usage: python fuzzer_ols300.py [--start PATTERN_INDEX]
 import subprocess, time, ctypes, ctypes.wintypes as wt, struct, os, sys, itertools
 
 WINOLS_EXE  = r"C:\Program Files\EVC\WinOLS\ols_32on32.exe"
+# Open a project so WinOLS triggers hardware init (WDU_Init)
+WINOLS_PROJECT = r"C:\Users\Nates\Documents\Evc\WinOLS\10000.ols"
 ID_PACKET   = r"C:\dev\winols-roadrunner-bridge\tools\id_packet.bin"
 LOG_FILE    = r"C:\dev\winols-roadrunner-bridge\tools\fuzzer_results.txt"
 PACKET_SIZE = 448
-WAIT_SEC    = 4   # seconds to wait after WinOLS starts before checking
+WAIT_SEC    = 10  # seconds to wait after WinOLS starts before checking
 
 user32 = ctypes.windll.user32
 k32    = ctypes.windll.kernel32
@@ -78,10 +80,119 @@ def kill_winols():
                    capture_output=True)
     time.sleep(0.8)
 
+def dismiss_ols11a():
+    """Click 'Nein' on the OLS-11a crash recovery dialog if it appears."""
+    for _ in range(20):  # poll for 4 seconds
+        hwnd = user32.FindWindowW("TForm", None)
+        if not hwnd:
+            hwnd = user32.FindWindowW(None, None)
+
+        # Find any dialog with "Nein" button from any WinOLS window
+        nein_found = [False]
+        CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        def find_nein(h, p):
+            buf = ctypes.create_unicode_buffer(32)
+            user32.GetWindowTextW(h, buf, 32)
+            if buf.value in ('Nein', 'No', '&Nein'):
+                user32.SendMessageW(h, 0x0201, 0, 0)  # WM_LBUTTONDOWN
+                user32.SendMessageW(h, 0x0202, 0, 0)  # WM_LBUTTONUP
+                nein_found[0] = True
+            return True
+        # Enumerate all top-level windows
+        all_wins = []
+        def get_all(h, p):
+            p2 = wt.DWORD(0)
+            if h: all_wins.append(h)
+            return True
+        user32.EnumWindows(CB(get_all), 0)
+        for w in all_wins:
+            user32.EnumChildWindows(w, CB(find_nein), 0)
+            if nein_found[0]:
+                return True
+        time.sleep(0.2)
+    return False
+
+VK_ALT   = 0x12
+VK_MENU  = 0x12
+
+def send_keys(key_sequence):
+    """Send keyboard input (list of VK codes to press sequentially)."""
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_KEYUP = 0x0002
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk",wt.WORD),("wScan",wt.WORD),("dwFlags",wt.DWORD),
+                    ("time",wt.DWORD),("dwExtraInfo",ctypes.c_ulong_p if hasattr(ctypes,'c_ulong_p') else ctypes.c_void_p)]
+    class INPUT(ctypes.Structure):
+        class _U(ctypes.Union):
+            _fields_ = [("ki",KEYBDINPUT)]
+        _anonymous_ = ("u",)
+        _fields_ = [("type",wt.DWORD),("u",_U)]
+    for vk in key_sequence:
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp.ki.wVk = vk
+        inp.ki.dwFlags = 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.05)
+        inp.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.05)
+
+def trigger_hardware_init():
+    """Open Configuration dialog via keyboard to trigger WDU_Init.
+    WinOLS: Miscellaneous → Configuration → Hardware → Simulator → USB → OK
+    The USB (OLS300) port must already be selected from previous manual setup."""
+    # Find WinOLS window to give it focus
+    pid_list = []
+    def ecb(hwnd, p):
+        p2 = wt.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(p2))
+        for pid in pid_list:
+            if p2.value == pid:
+                user32.SetForegroundWindow(hwnd)
+                return False
+        return True
+    # Get WinOLS PIDs
+    import subprocess as sp
+    r = sp.run(['tasklist', '/FI', 'IMAGENAME eq ols_32on32.exe', '/FO', 'CSV'],
+               capture_output=True, text=True)
+    for line in r.stdout.splitlines()[1:]:
+        parts = line.strip('"').split('","')
+        if len(parts) >= 2:
+            try: pid_list.append(int(parts[1]))
+            except: pass
+    CB = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    user32.EnumWindows(CB(ecb), 0)
+    time.sleep(0.3)
+
+    # Alt+M (Miscellaneous), then C (Configuration), then Enter
+    # This opens the Configuration dialog in WinOLS
+    # VK codes: Alt=0x12, M=0x4D, C=0x43, Enter=0x0D
+    user32.keybd_event(0x12, 0, 0, 0)      # Alt down
+    user32.keybd_event(0x4D, 0, 0, 0)      # M down
+    user32.keybd_event(0x4D, 0, 2, 0)      # M up
+    user32.keybd_event(0x12, 0, 2, 0)      # Alt up
+    time.sleep(0.5)
+    user32.keybd_event(0x43, 0, 0, 0)      # C down
+    user32.keybd_event(0x43, 0, 2, 0)      # C up
+    time.sleep(1.0)
+    # Config dialog should be open, navigate to OK button
+    user32.keybd_event(0x0D, 0, 0, 0)      # Enter (OK)
+    user32.keybd_event(0x0D, 0, 2, 0)
+
 def start_winols():
     kill_winols()
-    proc = subprocess.Popen([WINOLS_EXE])
-    time.sleep(WAIT_SEC)
+    cmd = [WINOLS_EXE]
+    if os.path.exists(WINOLS_PROJECT):
+        cmd.append(WINOLS_PROJECT)
+    proc = subprocess.Popen(cmd)
+    # Handle OLS-11a recovery dialog
+    time.sleep(1.5)
+    dismiss_ols11a()
+    time.sleep(3)  # Wait for WinOLS to load
+    # Trigger WDU_Init by simulating Config dialog OK
+    trigger_hardware_init()
+    time.sleep(WAIT_SEC)  # Wait for polling to start and ID packet to be served
     return proc
 
 # ── Packet generators ─────────────────────────────────────────────────────
@@ -152,22 +263,74 @@ CANDIDATES = [
 
 
 # ── Main fuzzer loop ──────────────────────────────────────────────────────
+WDAPI_LOG = r"C:\Users\Nates\AppData\Local\Temp\winols_wdapi.log"
+
+def get_log_tail(n=30):
+    """Read last n lines from wdapi log with shared access."""
+    try:
+        h = k32.CreateFileW(WDAPI_LOG, 0x80000000, 7, None, 3, 0, None)
+        if h == -1: return []
+        sz = k32.GetFileSize(h, None)
+        if sz == 0: k32.CloseHandle(h); return []
+        # Read last 4KB
+        off = max(0, sz - 4096)
+        k32.SetFilePointer(h, off, None, 0)
+        buf = ctypes.create_string_buffer(4096)
+        rd = wt.DWORD(0)
+        k32.ReadFile(h, buf, 4096, ctypes.byref(rd), None)
+        k32.CloseHandle(h)
+        return buf.raw[:rd.value].decode('utf-8', 'replace').splitlines()[-n:]
+    except:
+        return []
+
+def get_ols_struct_status(pid):
+    """Read OLS module struct status field at 0x04E022D0."""
+    try:
+        h = k32.OpenProcess(0x0010, False, pid)
+        if not h: return None
+        buf = ctypes.create_string_buffer(4)
+        rd = ctypes.c_size_t(0)
+        k32.ReadProcessMemory(h, ctypes.c_void_p(0x04E022D0), buf, 4, ctypes.byref(rd))
+        k32.CloseHandle(h)
+        return struct.unpack_from('<I', buf, 0)[0] if rd.value >= 4 else None
+    except:
+        return None
+
 def run_test(candidate):
-    """Write packet, start WinOLS, check status. Returns (status_text, accepted)."""
+    """Write packet, start WinOLS, check indicators. Returns (info_str, accepted)."""
     p = make_packet_candidate(candidate)
     with open(ID_PACKET, 'wb') as f:
         f.write(p)
 
+    # Get log size before
+    log_lines_before = len(get_log_tail(200))
+
     proc = start_winols()
     pid  = proc.pid
-    status = read_status_bar(pid, timeout=5.0)
+    time.sleep(WAIT_SEC + 1)  # extra wait for communication
+
+    # Check indicators:
+    # 1. Any TX writes on EP2 OUT (pipe=0x02) → WinOLS sent a command back
+    new_log = get_log_tail(200)
+    has_tx = any('TX' in l and 'Transfer' in l for l in new_log)
+    has_ep2_write = any('pipe=2' in l or 'pipe=0x02' in l for l in new_log)
+
+    # 2. OLS module struct status changed from 0
+    struct_status = get_ols_struct_status(pid)
+
+    # 3. Status bar attempt
+    status_txt = get_winols_status(pid)
+
     kill_winols()
 
-    accepted = status and any(k in status for k in (
-        'OLS300', 'Simulator', 'loaded', 'online', 'ready'
-    )) and 'No OLS' not in status
+    # Acceptance criteria (strict - no false positives from proxy startup messages):
+    # WinOLS sent a WRITE on EP2 OUT (pipe=2) → started command exchange
+    # This means WinOLS advanced past identification phase
+    accepted = has_ep2_write
 
-    return status or "(none)", accepted
+    info = (f"TX={has_tx} EP2OUT={has_ep2_write} struct=0x{struct_status or 0:08X} "
+            f"status={status_txt or '?'} log_lines={len(new_log)}")
+    return info, accepted
 
 
 def main():

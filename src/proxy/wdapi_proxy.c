@@ -198,6 +198,8 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
     return ret;
 }
 
+static void schedule_startup_attach(void);  /* fwd decl — defined after WDU types */
+
 /* ── DLL Entry ───────────────────────────────────────────────────────── */
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     (void)hInst; (void)res;
@@ -211,6 +213,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         AddVectoredExceptionHandler(1, veh_handler);
         load_id_packet();
         log_init();
+        /* Startup attach is scheduled from load_real_dll() after symbols exist */
         /* Load real wdapi1100_real.dll — Roadrunner now has WinUSB driver
            so wdapi can find it natively. VEH handles any windrvr.sys init failures. */
         char path[MAX_PATH];
@@ -224,6 +227,10 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         } else {
             wlog("wdapi proxy loaded (standalone fallback — real DLL not found)");
         }
+        /* Schedule startup pfDeviceAttach using fixed ols_32on32.exe addresses.
+           Fire after 2s so WinOLS main window is ready.
+           Works because ols_32on32.exe has no ASLR (packed exe = fixed base). */
+        schedule_startup_attach();
     } else if (reason == DLL_PROCESS_DETACH) {
         wlog("wdapi proxy unloaded");
         log_close();
@@ -336,12 +343,26 @@ static WDU_CONFIGURATION_DESCRIPTOR g_cfgdesc = {
 static WDU_CONFIGURATION g_config;   /* initialized in WDU_Init */
 static WDU_DEVICE        g_fake_device;
 
-/* Forward declarations for async attach */
+/* Forward declarations */
 static DWORD WINAPI attach_thread(LPVOID param);
 static WDU_ATTACH_CALLBACK g_attach_cb         = NULL;
 static PVOID               g_attach_userdata   = NULL;
 static WDU_DEVICE_HANDLE   g_attach_handle     = NULL;
 static WDU_DRIVER_HANDLE   g_real_driver_handle = NULL; /* real wdapi1660 handle */
+
+/* ── Startup attach: fire pfDeviceAttach at fixed ols_32on32.exe addr ── */
+/* ols_32on32.exe has no ASLR: pfDeviceAttach=0x005FA860, userData=0x01A99544 */
+static void schedule_startup_attach(void) {
+    if (g_attach_cb) return;  /* already set by WDU_Init */
+    g_attach_cb       = (WDU_ATTACH_CALLBACK)(uintptr_t)0x005FA860;
+    g_attach_userdata = (PVOID)(uintptr_t)0x01A99544;
+    wlog("Startup attach: pfDeviceAttach=0x005FA860 userData=0x01A99544");
+    HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL, CREATE_SUSPENDED, NULL);
+    if (ht) {
+        SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
+        ResumeThread(ht); CloseHandle(ht);
+    }
+}
 
 /* ── WDU_Init — let REAL wdapi handle device detection via WinUSB ────── */
 __declspec(dllexport)
@@ -456,7 +477,7 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
 static DWORD WINAPI attach_thread(LPVOID param) {
     (void)param;
-    Sleep(500);
+    Sleep(2000);  /* 2s: wait for WinOLS main window + hardware init */
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
 
