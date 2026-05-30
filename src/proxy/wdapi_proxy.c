@@ -433,33 +433,32 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
 
-    /* Get real device info from wdapi1660 if we have a real handle */
+    /* Always use fake WD11-format device info — real wdapi1660 returns WD16
+       format which is incompatible with WinOLS compiled for WD11.           */
     WDU_DEVICE* use_device = &g_fake_device;
-    void* real_dev_info = NULL;
-    if (g_attach_handle && g_real) {
-        typedef DWORD (__cdecl *PFN_GDI)(WDU_DEVICE_HANDLE, void**);
-        PFN_GDI real_gdi = (PFN_GDI)GetProcAddress(g_real, "WDU_GetDeviceInfo");
-        if (real_gdi) {
-            DWORD gdi_r = real_gdi(g_attach_handle, &real_dev_info);
-            if (gdi_r == 0 && real_dev_info) {
-                use_device = (WDU_DEVICE*)real_dev_info;
-                wlog("[attach] Using REAL device info from wdapi1660: %p", real_dev_info);
-            } else {
-                wlog("[attach] WDU_GetDeviceInfo failed (0x%lX) — using fake", (unsigned long)gdi_r);
-            }
+
+    /* Verify fake device structure integrity before passing to WinOLS */
+    if (use_device == &g_fake_device) {
+        void* check = g_fake_device.pActiveInterface[5];
+        wlog("[attach] g_fake_device.pActiveInterface[5] = %p (should be &g_altset=%p)",
+             check, (void*)&g_altset);
+        if (!check) {
+            wlog("[attach] ERROR: pActiveInterface[5] is NULL! Re-init fake device.");
+            for (int i = 0; i < WD_MAXDEVICES; i++)
+                g_fake_device.pActiveInterface[i] = &g_altset;
         }
     }
 
     wlog("[attach] pfDeviceAttach(handle=%p real=%d device=%p userData=%p)",
          use_handle, (g_attach_handle != NULL), use_device, g_attach_userdata);
-    BOOL ok = g_attach_cb(use_handle, use_device, g_attach_userdata);
 
-    /* Release real device info if we got it */
-    if (real_dev_info && g_real) {
-        typedef void (__cdecl *PFN_PDI)(void*);
-        PFN_PDI real_pdi = (PFN_PDI)GetProcAddress(g_real, "WDU_PutDeviceInfo");
-        if (real_pdi) real_pdi(real_dev_info);
-    }
+    /* If using real handle, use FAKE handle for pfDeviceAttach to avoid WD16 internals crash */
+    WDU_DEVICE_HANDLE safe_handle = (g_attach_handle && g_real_driver_handle)
+                                     ? FAKE_DEVICE_HANDLE  /* avoid WD16 internal crash */
+                                     : use_handle;
+    wlog("[attach] Using safe_handle=%p for callback", safe_handle);
+    BOOL ok = g_attach_cb(safe_handle, use_device, g_attach_userdata);
+
     wlog("[attach] pfDeviceAttach returned %d", ok);
     return 0;
 }
@@ -491,19 +490,20 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
     if (!fRead && pBuffer && dwBytes > 0)
         log_hex("WDU_Transfer TX", pBuffer, dwBytes);
 
-    /* Forward to real wdapi1660 if we have a real driver handle */
-    if (g_real_driver_handle && get_real("WDU_Transfer")) {
+    /* Forward to real wdapi1660 — pass hDevice directly (may be real device handle
+       from WinDriver's native pfDeviceAttach, or fake handle = will fail gracefully) */
+    if (get_real("WDU_Transfer")) {
         typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,DWORD,DWORD,
                                       void*,DWORD,DWORD*,BYTE*,DWORD);
         PFN fn = (PFN)get_real("WDU_Transfer");
-        DWORD r = fn(g_real_driver_handle, dwPipeNum, fRead, dwOptions,
+        DWORD r = fn(hDevice, dwPipeNum, fRead, dwOptions,
                      pBuffer, dwBytes, pdwBytesTransferred, pSetupPacket, dwTimeout);
-        wlog("  WDU_Transfer (real) pipe=%lu read=%lu bytes=%lu -> 0x%lX got=%lu",
+        DWORD got = pdwBytesTransferred ? *pdwBytesTransferred : 0;
+        wlog("  WDU_Transfer pipe=%lu read=%lu req=%lu -> 0x%lX got=%lu",
              (unsigned long)dwPipeNum, (unsigned long)fRead,
-             (unsigned long)dwBytes, (unsigned long)r,
-             pdwBytesTransferred ? (unsigned long)*pdwBytesTransferred : 0);
-        if (fRead && pBuffer && pdwBytesTransferred && *pdwBytesTransferred > 0)
-            log_hex("WDU_Transfer RX", pBuffer, *pdwBytesTransferred);
+             (unsigned long)dwBytes, (unsigned long)r, (unsigned long)got);
+        if (r == 0 && fRead && pBuffer && got > 0 && got < 10000)
+            log_hex("WDU_Transfer RX", pBuffer, got);
         return r;
     }
     if (pdwBytesTransferred) *pdwBytesTransferred = 0;
