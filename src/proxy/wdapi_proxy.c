@@ -330,15 +330,16 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         DWORD open_r = real_open(0, "12345abcde1234.license");
         wlog("  WDC_DriverOpen (demo license) -> 0x%08lX", (unsigned long)open_r);
 
+        /* Use demo license for WDU_Init — WinOLS's license is for WinDriver 11 */
         DWORD r = real_init(phDriver, pMatchTables, dwNumMatchTables,
-                            pEventTable, sLicense, dwOptions);
-        wlog("  WDU_Init (real) -> 0x%08lX handle=%p",
+                            pEventTable, "12345abcde1234.license", dwOptions);
+        wlog("  WDU_Init (real, demo lic) -> 0x%08lX handle=%p",
              (unsigned long)r, phDriver ? *phDriver : NULL);
         if (r == 0) {
-            wlog("  Real WDU_Init SUCCESS — WinUSB device found, native pfDeviceAttach will fire!");
+            wlog("  WDU_Init SUCCESS! Native pfDeviceAttach will fire when device is found.");
             return r;
         }
-        wlog("  Real WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
+        wlog("  WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
     }
 
     /* Fallback: fake mode if real wdapi can't find device */
