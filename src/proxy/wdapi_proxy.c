@@ -503,7 +503,10 @@ PT0(WD_LogStart)
 PT0(WDC_Sleep)
 PT0(get_os_type)
 
-/* ── OsMutex / OsEvent (missing from first build) ───────────────────── */
+/* ── All other exports are forwarded via wdapi1100.def → wdapi1100_real ─
+   Do NOT add PT macros here — wrong arg counts cause access violations.
+   The DEF file forwarder approach passes args unchanged.              ── */
+#if 0  /* disabled - use DEF forwarders instead */
 PT1(OsMutexCreate,  void*)
 PT1(OsMutexClose,   void*)
 PT1(OsMutexLock,    void*)
@@ -613,3 +616,4 @@ PT_RWADDR(WDC_PciWriteCfgBySlot)
 /* ── WD logging / driver name ─────────────────────────────────────────── */
 PT1(WD_DriverName,   const char*)
 PT1(WdFunctionLog,   void*)
+#endif  /* disabled PT macros */

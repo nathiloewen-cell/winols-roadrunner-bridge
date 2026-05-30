@@ -1,0 +1,162 @@
+LIBRARY wdapi1100
+EXPORTS
+  ; ── Intercepted (implemented in wdapi_proxy.c) ───────────────────────
+  WDU_Init
+  WDU_Uninit
+  WDU_Transfer
+  WDU_TransferBulk
+  WDU_TransferDefaultPipe
+  WDU_TransferInterrupt
+  WDU_TransferIsoch
+  WDU_StreamOpen
+  WDU_StreamRead
+  WDU_StreamWrite
+  WDU_StreamClose
+  WDU_StreamStart
+  WDU_StreamStop
+  WDU_StreamFlush
+  WDU_StreamGetStatus
+  WDU_GetDeviceInfo
+  WDU_PutDeviceInfo
+  WDU_GetDeviceAddr
+  WDU_GetDeviceRegistryProperty
+  WDU_GetLangIDs
+  WDU_GetStringDesc
+  WDU_ResetDevice
+  WDU_ResetPipe
+  WDU_SetInterface
+  WDU_HaltTransfer
+  WDU_SelectiveSuspend
+  WDU_Wakeup
+  WDC_DriverOpen
+  WDC_DriverClose
+  WDC_Version
+
+  ; ── Forwarded directly to real DLL (no stack manipulation) ───────────
+  EventAlloc                   = wdapi1100_real.EventAlloc
+  EventDup                     = wdapi1100_real.EventDup
+  EventFree                    = wdapi1100_real.EventFree
+  EventRegister                = wdapi1100_real.EventRegister
+  EventUnregister              = wdapi1100_real.EventUnregister
+  FreeDllPtr                   = wdapi1100_real.FreeDllPtr
+  GetPageCount                 = wdapi1100_real.GetPageCount
+  GetPageSize                  = wdapi1100_real.GetPageSize
+  HSConfigurePci               = wdapi1100_real.HSConfigurePci
+  HSWatchAlloc                 = wdapi1100_real.HSWatchAlloc
+  HSWatchFree                  = wdapi1100_real.HSWatchFree
+  InterruptDisable             = wdapi1100_real.InterruptDisable
+  InterruptEnable              = wdapi1100_real.InterruptEnable
+  InterruptThreadDisable       = wdapi1100_real.InterruptThreadDisable
+  InterruptThreadEnable        = wdapi1100_real.InterruptThreadEnable
+  OsEventClose                 = wdapi1100_real.OsEventClose
+  OsEventCreate                = wdapi1100_real.OsEventCreate
+  OsEventReset                 = wdapi1100_real.OsEventReset
+  OsEventSignal                = wdapi1100_real.OsEventSignal
+  OsEventWait                  = wdapi1100_real.OsEventWait
+  OsMutexClose                 = wdapi1100_real.OsMutexClose
+  OsMutexCreate                = wdapi1100_real.OsMutexCreate
+  OsMutexLock                  = wdapi1100_real.OsMutexLock
+  OsMutexUnlock                = wdapi1100_real.OsMutexUnlock
+  PciEventCreate               = wdapi1100_real.PciEventCreate
+  PcmciaEventCreate            = wdapi1100_real.PcmciaEventCreate
+  PrintDbgMessage              = wdapi1100_real.PrintDbgMessage
+  SleepWrapper                 = wdapi1100_real.SleepWrapper
+  Stat2Str                     = wdapi1100_real.Stat2Str
+  ThreadStart                  = wdapi1100_real.ThreadStart
+  ThreadStop                   = wdapi1100_real.ThreadStop
+  ThreadWait                   = wdapi1100_real.ThreadWait
+  UtilClrScr                   = wdapi1100_real.UtilClrScr
+  UtilGetFileName              = wdapi1100_real.UtilGetFileName
+  UtilGetFileSize              = wdapi1100_real.UtilGetFileSize
+  UtilGetStringFromUser        = wdapi1100_real.UtilGetStringFromUser
+  VB_EventRegister             = wdapi1100_real.VB_EventRegister
+  VB_EventUnregister           = wdapi1100_real.VB_EventUnregister
+  VB_InterruptDisable          = wdapi1100_real.VB_InterruptDisable
+  VB_InterruptEnable           = wdapi1100_real.VB_InterruptEnable
+  VB_Stat2Str                  = wdapi1100_real.VB_Stat2Str
+  VB_ThreadLoopStart           = wdapi1100_real.VB_ThreadLoopStart
+  VB_ThreadLoopStop            = wdapi1100_real.VB_ThreadLoopStop
+  WDC_AddrSpaceIsActive        = wdapi1100_real.WDC_AddrSpaceIsActive
+  WDC_CallKerPlug              = wdapi1100_real.WDC_CallKerPlug
+  WDC_CardCleanupSetup         = wdapi1100_real.WDC_CardCleanupSetup
+  WDC_DMABufUnlock             = wdapi1100_real.WDC_DMABufUnlock
+  WDC_DMAContigBufLock         = wdapi1100_real.WDC_DMAContigBufLock
+  WDC_DMASGBufLock             = wdapi1100_real.WDC_DMASGBufLock
+  WDC_DMASyncCpu               = wdapi1100_real.WDC_DMASyncCpu
+  WDC_DMASyncIo                = wdapi1100_real.WDC_DMASyncIo
+  WDC_Err                      = wdapi1100_real.WDC_Err
+  WDC_EventIsRegistered        = wdapi1100_real.WDC_EventIsRegistered
+  WDC_EventRegister            = wdapi1100_real.WDC_EventRegister
+  WDC_EventUnregister          = wdapi1100_real.WDC_EventUnregister
+  WDC_GetBusType               = wdapi1100_real.WDC_GetBusType
+  WDC_GetDevContext            = wdapi1100_real.WDC_GetDevContext
+  WDC_GetWDHandle              = wdapi1100_real.WDC_GetWDHandle
+  WDC_IntDisable               = wdapi1100_real.WDC_IntDisable
+  WDC_IntEnable                = wdapi1100_real.WDC_IntEnable
+  WDC_IntIsEnabled             = wdapi1100_real.WDC_IntIsEnabled
+  WDC_IsaDeviceClose           = wdapi1100_real.WDC_IsaDeviceClose
+  WDC_IsaDeviceOpen            = wdapi1100_real.WDC_IsaDeviceOpen
+  WDC_KernelPlugInOpen         = wdapi1100_real.WDC_KernelPlugInOpen
+  WDC_MultiTransfer            = wdapi1100_real.WDC_MultiTransfer
+  WDC_PciDeviceClose           = wdapi1100_real.WDC_PciDeviceClose
+  WDC_PciDeviceOpen            = wdapi1100_real.WDC_PciDeviceOpen
+  WDC_PciGetDeviceInfo         = wdapi1100_real.WDC_PciGetDeviceInfo
+  WDC_PciReadCfg               = wdapi1100_real.WDC_PciReadCfg
+  WDC_PciReadCfg8              = wdapi1100_real.WDC_PciReadCfg8
+  WDC_PciReadCfg16             = wdapi1100_real.WDC_PciReadCfg16
+  WDC_PciReadCfg32             = wdapi1100_real.WDC_PciReadCfg32
+  WDC_PciReadCfg64             = wdapi1100_real.WDC_PciReadCfg64
+  WDC_PciReadCfgBySlot         = wdapi1100_real.WDC_PciReadCfgBySlot
+  WDC_PciReadCfgBySlot8        = wdapi1100_real.WDC_PciReadCfgBySlot8
+  WDC_PciReadCfgBySlot16       = wdapi1100_real.WDC_PciReadCfgBySlot16
+  WDC_PciReadCfgBySlot32       = wdapi1100_real.WDC_PciReadCfgBySlot32
+  WDC_PciReadCfgBySlot64       = wdapi1100_real.WDC_PciReadCfgBySlot64
+  WDC_PciScanDevices           = wdapi1100_real.WDC_PciScanDevices
+  WDC_PciScanDevicesByTopology = wdapi1100_real.WDC_PciScanDevicesByTopology
+  WDC_PciScanRegisteredDevices = wdapi1100_real.WDC_PciScanRegisteredDevices
+  WDC_PciWriteCfg              = wdapi1100_real.WDC_PciWriteCfg
+  WDC_PciWriteCfg8             = wdapi1100_real.WDC_PciWriteCfg8
+  WDC_PciWriteCfg16            = wdapi1100_real.WDC_PciWriteCfg16
+  WDC_PciWriteCfg32            = wdapi1100_real.WDC_PciWriteCfg32
+  WDC_PciWriteCfg64            = wdapi1100_real.WDC_PciWriteCfg64
+  WDC_PciWriteCfgBySlot        = wdapi1100_real.WDC_PciWriteCfgBySlot
+  WDC_PciWriteCfgBySlot8       = wdapi1100_real.WDC_PciWriteCfgBySlot8
+  WDC_PciWriteCfgBySlot16      = wdapi1100_real.WDC_PciWriteCfgBySlot16
+  WDC_PciWriteCfgBySlot32      = wdapi1100_real.WDC_PciWriteCfgBySlot32
+  WDC_PciWriteCfgBySlot64      = wdapi1100_real.WDC_PciWriteCfgBySlot64
+  WDC_PcmciaDeviceClose        = wdapi1100_real.WDC_PcmciaDeviceClose
+  WDC_PcmciaDeviceOpen         = wdapi1100_real.WDC_PcmciaDeviceOpen
+  WDC_PcmciaGetDeviceInfo      = wdapi1100_real.WDC_PcmciaGetDeviceInfo
+  WDC_PcmciaReadAttribSpace    = wdapi1100_real.WDC_PcmciaReadAttribSpace
+  WDC_PcmciaScanDevices        = wdapi1100_real.WDC_PcmciaScanDevices
+  WDC_PcmciaSetVpp             = wdapi1100_real.WDC_PcmciaSetVpp
+  WDC_PcmciaSetWindow          = wdapi1100_real.WDC_PcmciaSetWindow
+  WDC_PcmciaWriteAttribSpace   = wdapi1100_real.WDC_PcmciaWriteAttribSpace
+  WDC_ReadAddr8                = wdapi1100_real.WDC_ReadAddr8
+  WDC_ReadAddr16               = wdapi1100_real.WDC_ReadAddr16
+  WDC_ReadAddr32               = wdapi1100_real.WDC_ReadAddr32
+  WDC_ReadAddr64               = wdapi1100_real.WDC_ReadAddr64
+  WDC_ReadAddrBlock            = wdapi1100_real.WDC_ReadAddrBlock
+  WDC_SetDebugOptions          = wdapi1100_real.WDC_SetDebugOptions
+  WDC_SharedBufferAlloc        = wdapi1100_real.WDC_SharedBufferAlloc
+  WDC_Sleep                    = wdapi1100_real.WDC_Sleep
+  WDC_Trace                    = wdapi1100_real.WDC_Trace
+  WDC_WriteAddr8               = wdapi1100_real.WDC_WriteAddr8
+  WDC_WriteAddr16              = wdapi1100_real.WDC_WriteAddr16
+  WDC_WriteAddr32              = wdapi1100_real.WDC_WriteAddr32
+  WDC_WriteAddr64              = wdapi1100_real.WDC_WriteAddr64
+  WDC_WriteAddrBlock           = wdapi1100_real.WDC_WriteAddrBlock
+  WD_CloseLog                  = wdapi1100_real.WD_CloseLog
+  WD_DriverName                = wdapi1100_real.WD_DriverName
+  WD_LogAdd                    = wdapi1100_real.WD_LogAdd
+  WD_LogStart                  = wdapi1100_real.WD_LogStart
+  WD_LogStop                   = wdapi1100_real.WD_LogStop
+  WD_OpenLog                   = wdapi1100_real.WD_OpenLog
+  WD_VB_DriverName             = wdapi1100_real.WD_VB_DriverName
+  WD_VB_InterruptThreadDisable = wdapi1100_real.WD_VB_InterruptThreadDisable
+  WD_VB_InterruptThreadEnable  = wdapi1100_real.WD_VB_InterruptThreadEnable
+  WdFunctionLog                = wdapi1100_real.WdFunctionLog
+  WDU_VB_Init                  = wdapi1100_real.WDU_VB_Init
+  WDU_VB_Uninit                = wdapi1100_real.WDU_VB_Uninit
+  get_os_type                  = wdapi1100_real.get_os_type
+  vPrintDbgMessage             = wdapi1100_real.vPrintDbgMessage
