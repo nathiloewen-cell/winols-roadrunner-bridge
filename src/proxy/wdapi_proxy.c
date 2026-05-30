@@ -284,8 +284,10 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         if (tbl->pfDeviceAttach) {
             /* Pass NULL for device info first — if WinOLS only needs the
                handle, this avoids struct layout mismatches entirely.      */
-            wlog("  Calling pfDeviceAttach(handle=%p, device=NULL, userData=%p)",
-                 FAKE_DEVICE_HANDLE, tbl->pUserData);
+            wlog("  Calling pfDeviceAttach(handle=%p, device=%p, userData=%p)",
+                 FAKE_DEVICE_HANDLE, &g_fake_device, tbl->pUserData);
+            /* Pass real device struct — WinOLS checks it before accepting */
+            wlog("  pfDeviceAttach with real device struct (WD_MAXDEVICES=%d)", WD_MAXDEVICES);
             BOOL ok = tbl->pfDeviceAttach(FAKE_DEVICE_HANDLE,
                                           &g_fake_device,
                                           tbl->pUserData);
@@ -331,81 +333,67 @@ DWORD __cdecl WDU_TransferBulk(WDU_DEVICE_HANDLE hDevice,
 }
 
 /* ── WDU Stream functions ─────────────────────────────────────────────── */
+/* Fake stream handle — real wdapi needs WinDriver kernel which isn't installed */
+static DWORD g_fake_stream_data[64] = {0};
+
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamOpen(WDU_DEVICE_HANDLE hDevice, DWORD dwPipeNum,
                               DWORD dwBufferSize, DWORD dwRxSize,
                               BOOL fBlocking, DWORD dwOptions,
                               DWORD dwTimeout, void** phStream) {
-    wlog("WDU_StreamOpen(pipe=%lu bufsize=%lu)", (unsigned long)dwPipeNum,
-         (unsigned long)dwBufferSize);
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,DWORD,DWORD,BOOL,DWORD,DWORD,void**);
-    PFN fn = (PFN)get_real("WDU_StreamOpen");
-    if (!fn) return 0xFFFFFFFF;
-    DWORD r = fn(hDevice, dwPipeNum, dwBufferSize, dwRxSize, fBlocking,
-                 dwOptions, dwTimeout, phStream);
-    wlog("  WDU_StreamOpen -> 0x%lX stream=%p", (unsigned long)r,
-         phStream ? *phStream : NULL);
-    return r;
+    wlog("WDU_StreamOpen(pipe=%lu) -> fake handle", (unsigned long)dwPipeNum);
+    /* Return valid non-NULL handle so WinOLS won't write-to-NULL crash */
+    if (phStream) *phStream = g_fake_stream_data;
+    return 0; /* WD_STATUS_SUCCESS */
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamRead(void* hStream, void* pBuffer, DWORD bytes,
                               DWORD* pdwBytesRead) {
-    typedef DWORD (__cdecl *PFN)(void*, void*, DWORD, DWORD*);
-    PFN fn = (PFN)get_real("WDU_StreamRead");
-    if (!fn) return 0xFFFFFFFF;
-    DWORD r = fn(hStream, pBuffer, bytes, pdwBytesRead);
-    if (pBuffer && pdwBytesRead && *pdwBytesRead > 0)
-        log_hex("WDU_StreamRead RX", pBuffer, *pdwBytesRead);
-    return r;
+    /* TODO: read from Roadrunner, translate to OLS300 response */
+    if (pdwBytesRead) *pdwBytesRead = 0;
+    wlog("WDU_StreamRead(%lu bytes requested) -> 0 bytes (TODO: Roadrunner)", (unsigned long)bytes);
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamWrite(void* hStream, const void* pBuffer,
                                DWORD bytes, DWORD* pdwBytesWritten) {
+    /* TODO: translate OLS300 command to Roadrunner MoatesWare */
     if (pBuffer && bytes > 0)
-        log_hex("WDU_StreamWrite TX", pBuffer, bytes);
-    typedef DWORD (__cdecl *PFN)(void*, const void*, DWORD, DWORD*);
-    PFN fn = (PFN)get_real("WDU_StreamWrite");
-    if (!fn) return 0xFFFFFFFF;
-    return fn(hStream, pBuffer, bytes, pdwBytesWritten);
+        log_hex("WDU_StreamWrite TX (OLS300 cmd)", pBuffer, bytes);
+    if (pdwBytesWritten) *pdwBytesWritten = bytes;
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamClose(void* hStream) {
-    wlog("WDU_StreamClose(%p)", hStream);
-    typedef DWORD (__cdecl *PFN)(void*);
-    PFN fn = (PFN)get_real("WDU_StreamClose");
-    return fn ? fn(hStream) : 0;
+    wlog("WDU_StreamClose -> fake OK");
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamStart(void* hStream) {
-    typedef DWORD (__cdecl *PFN)(void*);
-    PFN fn = (PFN)get_real("WDU_StreamStart");
-    return fn ? fn(hStream) : 0;
+    wlog("WDU_StreamStart -> fake OK");
+    return 0;
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamStop(void* hStream) {
-    typedef DWORD (__cdecl *PFN)(void*);
-    PFN fn = (PFN)get_real("WDU_StreamStop");
-    return fn ? fn(hStream) : 0;
+    wlog("WDU_StreamStop -> fake OK");
+    return 0;
 }
 
 __declspec(dllexport)
-DWORD __cdecl WDU_StreamFlush(void* hStream) {
-    typedef DWORD (__cdecl *PFN)(void*);
-    PFN fn = (PFN)get_real("WDU_StreamFlush");
-    return fn ? fn(hStream) : 0;
-}
+DWORD __cdecl WDU_StreamFlush(void* hStream) { return 0; }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_StreamGetStatus(void* hStream, BOOL* pfIsRunning,
                                    DWORD* pdwLastError, DWORD* pdwBytesInBuf) {
-    typedef DWORD (__cdecl *PFN)(void*, BOOL*, DWORD*, DWORD*);
-    PFN fn = (PFN)get_real("WDU_StreamGetStatus");
-    return fn ? fn(hStream, pfIsRunning, pdwLastError, pdwBytesInBuf) : 0;
+    if (pfIsRunning)   *pfIsRunning   = TRUE;
+    if (pdwLastError)  *pdwLastError  = 0;
+    if (pdwBytesInBuf) *pdwBytesInBuf = 0;
+    return 0;
 }
 
 /* ── Device info functions ───────────────────────────────────────────── */
@@ -495,9 +483,24 @@ __declspec(dllexport)
 DWORD __cdecl WDU_GetStringDesc(WDU_DEVICE_HANDLE hDevice, BYTE bStrIndex,
                                  void* pbBuf, DWORD dwBufSize, WORD wLangID,
                                  DWORD* pdwDescSize) {
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,BYTE,void*,DWORD,WORD,DWORD*);
-    PFN fn = (PFN)get_real("WDU_GetStringDesc");
-    return fn ? fn(hDevice, bStrIndex, pbBuf, dwBufSize, wLangID, pdwDescSize) : 0;
+    wlog("WDU_GetStringDesc(handle=%p idx=%u langID=0x%04X bufSize=%lu)",
+         hDevice, bStrIndex, wLangID, (unsigned long)dwBufSize);
+
+    /* Intercept serial number request (index from iSerialNumber in descriptor).
+       Return a fixed serial "BSL100001" so WinOLS can match it. */
+    if (bStrIndex > 0 && pbBuf && dwBufSize >= 20) {
+        /* USB string descriptor: length(1) + type(1) + UTF-16LE string */
+        const wchar_t* serial = L"BSL100001";
+        DWORD slen = (DWORD)(wcslen(serial) * 2);
+        BYTE* b = (BYTE*)pbBuf;
+        b[0] = (BYTE)(2 + slen);   /* bLength */
+        b[1] = 0x03;               /* bDescriptorType = STRING */
+        memcpy(b + 2, serial, slen);
+        if (pdwDescSize) *pdwDescSize = 2 + slen;
+        wlog("  Returned serial string idx=%u: BSL100001", bStrIndex);
+        return 0; /* WD_STATUS_SUCCESS */
+    }
+    return 0;
 }
 
 __declspec(dllexport)
