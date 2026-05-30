@@ -141,7 +141,17 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     return TRUE;
 }
 
-/* ── WDU_Init — intercept USB device registration ────────────────────── */
+/* ── OLS300 device identity (discovered from WDU_Init log) ──────────── */
+#define OLS300_VID  0x0547   /* Cypress Semiconductor FX2 */
+#define OLS300_PID  0x3000   /* OLS300 product ID        */
+
+/* Fake driver handle — WinDriver kernel is not installed on this PC.
+   We return a fake success so WinOLS doesn't crash, then intercept all
+   USB transfer calls to translate them to Roadrunner (Moates) protocol. */
+#define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)0x4F4C5300)  /* "OLS\0" */
+#define FAKE_DEVICE_HANDLE  ((WDU_DEVICE_HANDLE)0x4F4C5301)
+
+/* ── WDU_Init — return fake success so WinOLS doesn't crash ─────────── */
 __declspec(dllexport)
 DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
                         WDU_MATCH_TABLE* pMatchTables,
@@ -149,36 +159,22 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
                         void* pEventTable,
                         const char* sLicense,
                         DWORD dwOptions) {
-    wlog("WDU_Init called with %lu match table(s):", (unsigned long)dwNumMatchTables);
-    if (pMatchTables) {
-        for (DWORD i = 0; i < dwNumMatchTables; i++) {
-            wlog("  [%lu] VID=0x%04X PID=0x%04X DevClass=0x%02X IfClass=0x%02X",
-                 (unsigned long)i,
-                 pMatchTables[i].wVendorId,
-                 pMatchTables[i].wProductId,
-                 pMatchTables[i].bDeviceClass,
-                 pMatchTables[i].bInterfaceClass);
-        }
-    }
-    if (sLicense) wlog("  License: %.32s", sLicense);
+    wlog("WDU_Init: VID=0x%04X PID=0x%04X (OLS300 confirmed)",
+         pMatchTables ? pMatchTables[0].wVendorId : 0,
+         pMatchTables ? pMatchTables[0].wProductId : 0);
 
-    typedef DWORD (__cdecl *PFN)(WDU_DRIVER_HANDLE*, WDU_MATCH_TABLE*,
-                                   DWORD, void*, const char*, DWORD);
-    PFN fn = (PFN)get_real("WDU_Init");
-    if (!fn) { wlog("  WDU_Init: real fn not found"); return 0xFFFFFFFF; }
-    DWORD r = fn(phDriver, pMatchTables, dwNumMatchTables,
-                 pEventTable, sLicense, dwOptions);
-    wlog("  WDU_Init -> 0x%08lX  handle=%p", (unsigned long)r,
-         phDriver ? *phDriver : NULL);
-    return r;
+    /* Do NOT call real WDU_Init — WinDriver kernel not installed.
+       Return fake success so WinOLS proceeds without crash.
+       All subsequent WDU_Transfer calls will be bridged to Roadrunner. */
+    if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
+    wlog("  WDU_Init -> fake success, handle=%p", FAKE_DRIVER_HANDLE);
+    return 0;  /* WD_STATUS_SUCCESS */
 }
 
 __declspec(dllexport)
 DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
-    wlog("WDU_Uninit(handle=%p)", hDriver);
-    typedef DWORD (__cdecl *PFN)(WDU_DRIVER_HANDLE);
-    PFN fn = (PFN)get_real("WDU_Uninit");
-    return fn ? fn(hDriver) : 0;
+    wlog("WDU_Uninit(handle=%p) -> fake OK", hDriver);
+    return 0;
 }
 
 /* ── WDU_Transfer / WDU_TransferBulk — intercept data ───────────────── */
@@ -188,23 +184,11 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                             DWORD dwOptions, void* pBuffer,
                             DWORD dwBytes, DWORD* pdwBytesTransferred,
                             BYTE* pSetupPacket, DWORD dwTimeout) {
+    /* TODO S5: translate OLS300 protocol to Roadrunner MoatesWare */
     if (!fRead && pBuffer && dwBytes > 0)
-        log_hex("WDU_Transfer TX", pBuffer, dwBytes);
-
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE, DWORD, DWORD, DWORD,
-                                   void*, DWORD, DWORD*, BYTE*, DWORD);
-    PFN fn = (PFN)get_real("WDU_Transfer");
-    if (!fn) return 0xFFFFFFFF;
-    DWORD r = fn(hDevice, dwPipeNum, fRead, dwOptions, pBuffer, dwBytes,
-                 pdwBytesTransferred, pSetupPacket, dwTimeout);
-
-    if (fRead && pBuffer && pdwBytesTransferred && *pdwBytesTransferred > 0)
-        log_hex("WDU_Transfer RX", pBuffer, *pdwBytesTransferred);
-    else
-        wlog("WDU_Transfer(pipe=%lu fRead=%lu bytes=%lu) -> 0x%lX",
-             (unsigned long)dwPipeNum, (unsigned long)fRead,
-             (unsigned long)dwBytes, (unsigned long)r);
-    return r;
+        log_hex("WDU_Transfer TX (OLS300 cmd)", pBuffer, dwBytes);
+    if (pdwBytesTransferred) *pdwBytesTransferred = 0;
+    return 0;
 }
 
 __declspec(dllexport)
@@ -212,19 +196,12 @@ DWORD __cdecl WDU_TransferBulk(WDU_DEVICE_HANDLE hDevice,
                                  DWORD dwPipeNum, void* pBuffer,
                                  DWORD* pdwBytes, DWORD dwOptions,
                                  DWORD dwTimeout) {
+    /* TODO S6: translate OLS300 bulk transfer to Roadrunner MoatesWare */
     DWORD sz = pdwBytes ? *pdwBytes : 0;
     if (pBuffer && sz > 0)
-        log_hex("WDU_TransferBulk TX", pBuffer, sz);
-
-    typedef DWORD (__cdecl *PFN)(WDU_DEVICE_HANDLE,DWORD,void*,DWORD*,DWORD,DWORD);
-    PFN fn = (PFN)get_real("WDU_TransferBulk");
-    if (!fn) return 0xFFFFFFFF;
-    DWORD r = fn(hDevice, dwPipeNum, pBuffer, pdwBytes, dwOptions, dwTimeout);
-
-    if (pBuffer && pdwBytes && *pdwBytes > 0)
-        log_hex("WDU_TransferBulk RX", pBuffer, *pdwBytes);
-    wlog("  WDU_TransferBulk -> 0x%lX", (unsigned long)r);
-    return r;
+        log_hex("WDU_TransferBulk TX (OLS300 cmd)", pBuffer, sz);
+    if (pdwBytes) *pdwBytes = 0;
+    return 0;
 }
 
 /* ── WDU Stream functions ─────────────────────────────────────────────── */
@@ -452,18 +429,14 @@ __declspec(dllexport) ret __cdecl name(__VA_ARGS__) { \
 
 /* Simple zero-arg passthrough helpers */
 __declspec(dllexport) DWORD __cdecl WDC_DriverOpen(void* pCfg, const char* pcLic) {
-    wlog("WDC_DriverOpen called");
-    typedef DWORD (__cdecl *PFN)(void*, const char*);
-    PFN fn = (PFN)get_real("WDC_DriverOpen");
-    DWORD r = fn ? fn(pCfg, pcLic) : 0xFFFFFFFF;
-    wlog("  WDC_DriverOpen -> 0x%lX", (unsigned long)r);
-    return r;
+    /* Fake success — WinDriver kernel not installed */
+    wlog("WDC_DriverOpen -> fake success");
+    return 0;
 }
 
 __declspec(dllexport) DWORD __cdecl WDC_DriverClose(void) {
-    typedef DWORD (__cdecl *PFN)(void);
-    PFN fn = (PFN)get_real("WDC_DriverClose");
-    return fn ? fn() : 0;
+    wlog("WDC_DriverClose -> fake OK");
+    return 0;
 }
 
 __declspec(dllexport) DWORD __cdecl WDC_Version(char* pVer, DWORD dwLen) {
