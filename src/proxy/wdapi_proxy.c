@@ -412,12 +412,34 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     Sleep(500);
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
-    /* Use NULL for device info when using real handle — avoids layout mismatch crash.
-       WinOLS may reject device if NULL, but won't crash. With fake handle use fake device. */
-    WDU_DEVICE* use_device = g_attach_handle ? NULL : &g_fake_device;
+
+    /* Get real device info from wdapi1660 if we have a real handle */
+    WDU_DEVICE* use_device = &g_fake_device;
+    void* real_dev_info = NULL;
+    if (g_attach_handle && g_real) {
+        typedef DWORD (__cdecl *PFN_GDI)(WDU_DEVICE_HANDLE, void**);
+        PFN_GDI real_gdi = (PFN_GDI)GetProcAddress(g_real, "WDU_GetDeviceInfo");
+        if (real_gdi) {
+            DWORD gdi_r = real_gdi(g_attach_handle, &real_dev_info);
+            if (gdi_r == 0 && real_dev_info) {
+                use_device = (WDU_DEVICE*)real_dev_info;
+                wlog("[attach] Using REAL device info from wdapi1660: %p", real_dev_info);
+            } else {
+                wlog("[attach] WDU_GetDeviceInfo failed (0x%lX) — using fake", (unsigned long)gdi_r);
+            }
+        }
+    }
+
     wlog("[attach] pfDeviceAttach(handle=%p real=%d device=%p userData=%p)",
          use_handle, (g_attach_handle != NULL), use_device, g_attach_userdata);
     BOOL ok = g_attach_cb(use_handle, use_device, g_attach_userdata);
+
+    /* Release real device info if we got it */
+    if (real_dev_info && g_real) {
+        typedef void (__cdecl *PFN_PDI)(void*);
+        PFN_PDI real_pdi = (PFN_PDI)GetProcAddress(g_real, "WDU_PutDeviceInfo");
+        if (real_pdi) real_pdi(real_dev_info);
+    }
     wlog("[attach] pfDeviceAttach returned %d", ok);
     return 0;
 }
