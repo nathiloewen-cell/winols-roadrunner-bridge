@@ -502,3 +502,114 @@ PT0(WD_OpenLog)
 PT0(WD_LogStart)
 PT0(WDC_Sleep)
 PT0(get_os_type)
+
+/* ── OsMutex / OsEvent (missing from first build) ───────────────────── */
+PT1(OsMutexCreate,  void*)
+PT1(OsMutexClose,   void*)
+PT1(OsMutexLock,    void*)
+PT1(OsMutexUnlock,  void*)
+PT1(OsEventCreate,  void*)
+PT1(OsEventClose,   void*)
+PT1(OsEventReset,   void*)
+PT1(OsEventSignal,  void*)
+PT2(OsEventWait,    void*, DWORD)
+
+/* ── Event / Interrupt helpers ───────────────────────────────────────── */
+PT1(EventAlloc,    void*)
+PT2(EventDup,      void*, void*)
+PT1(EventFree,     void*)
+PT2(EventRegister,   void*, void*)
+PT1(EventUnregister, void*)
+PT2(InterruptEnable,  void*, void*)
+PT1(InterruptDisable, void*)
+PT2(InterruptThreadEnable,  void*, void*)
+PT1(InterruptThreadDisable, void*)
+PT1(FreeDllPtr,    void*)
+PT0(GetPageCount)
+PT0(GetPageSize)
+
+/* ── Thread helpers ──────────────────────────────────────────────────── */
+PT2(ThreadStart, void*, void*)
+PT1(ThreadStop,  void*)
+PT1(ThreadWait,  void*)
+
+/* ── Util helpers ────────────────────────────────────────────────────── */
+PT0(UtilClrScr)
+PT1(UtilGetFileName,      void*)
+PT1(UtilGetFileSize,      void*)
+PT1(UtilGetStringFromUser, void*)
+PT1(Stat2Str, DWORD)
+
+/* ── VB helpers ──────────────────────────────────────────────────────── */
+PT2(VB_EventRegister,   void*, void*)
+PT1(VB_EventUnregister, void*)
+PT2(VB_InterruptEnable,  void*, void*)
+PT1(VB_InterruptDisable, void*)
+PT1(VB_Stat2Str, DWORD)
+PT2(VB_ThreadLoopStart, void*, void*)
+PT1(VB_ThreadLoopStop,  void*)
+PT2(WDU_VB_Init,   void*, void*)
+PT1(WDU_VB_Uninit, void*)
+PT2(WD_VB_DriverName, void*, void*)
+PT2(WD_VB_InterruptThreadEnable,  void*, void*)
+PT1(WD_VB_InterruptThreadDisable, void*)
+
+/* ── HS (Hardware Spy) ───────────────────────────────────────────────── */
+PT2(HSConfigurePci, void*, void*)
+PT2(HSWatchAlloc,   void*, void*)
+PT1(HSWatchFree,    void*)
+PT2(PciEventCreate,    void*, void*)
+PT2(PcmciaEventCreate, void*, void*)
+
+/* ── WDC device/addr/DMA ─────────────────────────────────────────────── */
+PT2(WDC_AddrSpaceIsActive, void*, DWORD)
+PT2(WDC_CallKerPlug,   void*, void*)
+PT2(WDC_CardCleanupSetup, void*, void*)
+PT1(WDC_DMABufUnlock,  void*)
+PT2(WDC_DMAContigBufLock, void*, void*)
+PT2(WDC_DMASGBufLock,  void*, void*)
+PT1(WDC_DMASyncCpu,    void*)
+PT1(WDC_DMASyncIo,     void*)
+PT2(WDC_EventRegister,   void*, void*)
+PT1(WDC_EventUnregister, void*)
+PT2(WDC_IntEnable,   void*, void*)
+PT1(WDC_IntDisable,  void*)
+PT2(WDC_IsaDeviceOpen,  void*, void*)
+PT1(WDC_IsaDeviceClose, void*)
+PT2(WDC_KernelPlugInOpen, void*, void*)
+PT2(WDC_MultiTransfer,  void*, DWORD)
+PT2(WDC_PciDeviceOpen,  void*, void*)
+PT1(WDC_PciDeviceClose, void*)
+PT2(WDC_PciGetDeviceInfo, void*, void*)
+PT2(WDC_PciScanDevices,           void*, void*)
+PT2(WDC_PciScanDevicesByTopology,  void*, void*)
+PT2(WDC_PciScanRegisteredDevices,  void*, void*)
+PT2(WDC_PcmciaDeviceOpen,   void*, void*)
+PT1(WDC_PcmciaDeviceClose,  void*)
+PT2(WDC_PcmciaGetDeviceInfo, void*, void*)
+PT2(WDC_PcmciaScanDevices,   void*, void*)
+PT2(WDC_PcmciaSetVpp,        void*, DWORD)
+PT2(WDC_PcmciaSetWindow,     void*, void*)
+PT2(WDC_PcmciaReadAttribSpace,  void*, void*)
+PT2(WDC_PcmciaWriteAttribSpace, void*, void*)
+PT2(WDC_SharedBufferAlloc, DWORD, void*)
+PT2(WDC_ReadAddrBlock,  void*, void*)
+PT2(WDC_WriteAddrBlock, void*, void*)
+
+/* ── WDC Read/Write addr (all widths) ────────────────────────────────── */
+#define PT_RWADDR(name) \
+PT2(name##8,  void*, DWORD) \
+PT2(name##16, void*, DWORD) \
+PT2(name##32, void*, DWORD) \
+PT2(name##64, void*, DWORD)
+
+PT_RWADDR(WDC_ReadAddr)
+PT_RWADDR(WDC_WriteAddr)
+PT_RWADDR(WDC_PciReadCfg)
+PT_RWADDR(WDC_PciWriteCfg)
+PT_RWADDR(WDC_PciReadCfgBySlot)
+PT_RWADDR(WDC_PciWriteCfgBySlot)
+
+/* ── WD logging / driver name ─────────────────────────────────────────── */
+PT1(WD_DriverName,   const char*)
+PT1(WdFunctionLog,   void*)
