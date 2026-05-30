@@ -330,17 +330,22 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     for (int i = 0; i < WD_MAXDEVICES; i++)
         g_fake_device.pActiveInterface[i] = &g_altset;
 
-    /* ASYNC: call pfDeviceAttach from a worker thread 200ms after WDU_Init
-       returns. Calling it synchronously (from inside WDU_Init) means WinOLS
-       hasn't finished its own initialization yet, so it returns 0 (reject).
-       Giving WinOLS 200ms to complete init lets the callback succeed. */
+    /* Call pfDeviceAttach after a short delay on a thread.
+       500ms gives WinOLS enough time to finish WDU_Init processing.
+       Thread has THREAD_PRIORITY_BELOW_NORMAL to avoid starving main thread. */
     if (pEventTable) {
         WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
         if (tbl->pfDeviceAttach) {
             g_attach_cb       = tbl->pfDeviceAttach;
             g_attach_userdata = tbl->pUserData;
-            wlog("  Scheduling async pfDeviceAttach (200ms delay)...");
-            CreateThread(NULL, 0, attach_thread, NULL, 0, NULL);
+            wlog("  Scheduling pfDeviceAttach (500ms delay)...");
+            HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
+                                     CREATE_SUSPENDED, NULL);
+            if (ht) {
+                SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
+                ResumeThread(ht);
+                CloseHandle(ht);
+            }
         }
     }
     return 0;
@@ -348,12 +353,12 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
 static DWORD WINAPI attach_thread(LPVOID param) {
     (void)param;
-    Sleep(200);
+    Sleep(500);  /* longer delay — let WinOLS fully initialize */
     if (!g_attach_cb) return 0;
-    wlog("[async] pfDeviceAttach(handle=%p device=%p userData=%p)",
+    wlog("[attach] pfDeviceAttach(handle=%p device=%p userData=%p)",
          FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
     BOOL ok = g_attach_cb(FAKE_DEVICE_HANDLE, &g_fake_device, g_attach_userdata);
-    wlog("[async] pfDeviceAttach returned %d", ok);
+    wlog("[attach] pfDeviceAttach returned %d", ok);
     return 0;
 }
 
