@@ -146,8 +146,14 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
 #define OLS300_VID  0x0547
 #define OLS300_PID  0x3000
 
-#define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)0x4F4C5300)
-#define FAKE_DEVICE_HANDLE  ((WDU_DEVICE_HANDLE)0x4F4C5301)
+/* WinOLS dereferences device handles as pointers to internal structures.
+   We allocate real memory so reads return 0 instead of crashing.
+   Size 256 bytes covers any internal WinDriver device struct WinOLS reads. */
+static DWORD g_fake_driver_data[64] = {0};
+static DWORD g_fake_device_data[64] = {0};
+
+#define FAKE_DRIVER_HANDLE  ((WDU_DRIVER_HANDLE)g_fake_driver_data)
+#define FAKE_DEVICE_HANDLE  ((WDU_DEVICE_HANDLE)g_fake_device_data)
 
 /* ── WinDriver USB device structures (minimal subset) ───────────────── */
 typedef struct {
