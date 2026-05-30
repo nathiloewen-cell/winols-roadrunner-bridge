@@ -133,8 +133,18 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
         return EXCEPTION_CONTINUE_SEARCH;
     DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
     DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
-    /* Catch: write to NULL/low addresses AND write to kernel-space (>0x80000000) */
-    BOOL is_bad = (op == 1) && (fault < 0x10000 || fault >= 0x80000000);
+    /* Catch writes to: NULL/guard range, kernel space, OR any uncommitted page */
+    BOOL is_bad = (op == 1);
+    if (is_bad && fault >= 0x10000 && fault < 0x80000000) {
+        /* Use VirtualQuery to check if fault address is actually accessible */
+        MEMORY_BASIC_INFORMATION mbi = {0};
+        if (VirtualQuery((void*)(uintptr_t)fault, &mbi, sizeof(mbi)) &&
+            mbi.State != MEM_COMMIT) {
+            is_bad = TRUE;  /* uncommitted page — not safe to write */
+        } else {
+            is_bad = FALSE; /* page is committed and accessible */
+        }
+    }
     if (is_bad) {
         CONTEXT* ctx = pEx->ContextRecord;
         DWORD safe   = (DWORD)(uintptr_t)g_safe_write_buf;
