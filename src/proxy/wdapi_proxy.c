@@ -123,15 +123,44 @@ typedef struct {
     DWORD fOK;
 } WD_TRANSFER;
 
+/* ── Vectored Exception Handler: intercept NULL-write crash ─────────── */
+static BYTE g_safe_write_buf[4096];
+
+static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
+    if (!pEx || !pEx->ExceptionRecord || !pEx->ContextRecord)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (pEx->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    DWORD op    = (DWORD)pEx->ExceptionRecord->ExceptionInformation[0];
+    DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
+    if (op == 1 && fault < 0x1000) {
+        CONTEXT* ctx = pEx->ContextRecord;
+        DWORD safe   = (DWORD)(uintptr_t)g_safe_write_buf;
+        wlog("VEH: NULL write at EIP=0x%08lX fault=0x%08lX — redirecting",
+             (unsigned long)pEx->ExceptionRecord->ExceptionAddress,
+             (unsigned long)fault);
+        if (ctx->Eax < 0x1000) ctx->Eax = safe;
+        if (ctx->Ebx < 0x1000) ctx->Ebx = safe;
+        if (ctx->Ecx < 0x1000) ctx->Ecx = safe;
+        if (ctx->Edx < 0x1000) ctx->Edx = safe;
+        if (ctx->Esi < 0x1000) ctx->Esi = safe;
+        if (ctx->Edi < 0x1000) ctx->Edi = safe;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 /* ── DLL Entry ───────────────────────────────────────────────────────── */
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
     (void)hInst; (void)res;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hInst);
+        memset(g_safe_write_buf, 0, sizeof(g_safe_write_buf));
         /* Pre-fill fake handles so pointer-chasing doesn't hit NULL */
         init_self_referencing(g_fake_driver_data, 64);
         init_self_referencing(g_fake_device_data, 64);
         init_self_referencing(g_fake_stream_data,  64);
+        AddVectoredExceptionHandler(1, veh_handler);
         log_init();
         /* Load the real wdapi1100 from our backup name */
         char path[MAX_PATH];
