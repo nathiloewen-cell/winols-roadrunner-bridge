@@ -197,11 +197,15 @@ typedef struct {
     DWORD dwNumInterfaces;
 } WDU_CONFIGURATION;
 
+/* WD_MAXDEVICES=16 confirmed: WinOLS reads pActiveInterface[5] = offset 48
+   (20 bytes descriptor+pad + 4 pConfigs + 4 pActiveConfig + 5*4 = 48) */
+#define WD_MAXDEVICES 16
+
 typedef struct {
-    WDU_DEVICE_DESCRIPTOR Descriptor;
-    WDU_CONFIGURATION*    pConfigs;
-    WDU_CONFIGURATION*    pActiveConfig;
-    WDU_ALTERNATE_SETTING* pActiveInterface[1];
+    WDU_DEVICE_DESCRIPTOR  Descriptor;
+    WDU_CONFIGURATION*     pConfigs;
+    WDU_CONFIGURATION*     pActiveConfig;
+    WDU_ALTERNATE_SETTING* pActiveInterface[WD_MAXDEVICES];
 } WDU_DEVICE;
 
 /* WDU_EVENT_TABLE callback signatures */
@@ -263,7 +267,9 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     g_fake_device.Descriptor.bNumConfigurations = 1;
     g_fake_device.pConfigs       = &g_config;
     g_fake_device.pActiveConfig  = &g_config;
-    g_fake_device.pActiveInterface[0] = &g_altset;
+    /* Fill all WD_MAXDEVICES entries — WinOLS reads up to index 5 at minimum */
+    for (int i = 0; i < WD_MAXDEVICES; i++)
+        g_fake_device.pActiveInterface[i] = &g_altset;
 
     /* Call WinOLS device-attach callback so it thinks OLS300 is connected.
        This makes 'Load/Disconnect' active and triggers WDU_Transfer calls. */
@@ -275,7 +281,7 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
             wlog("  Calling pfDeviceAttach(handle=%p, device=NULL, userData=%p)",
                  FAKE_DEVICE_HANDLE, tbl->pUserData);
             BOOL ok = tbl->pfDeviceAttach(FAKE_DEVICE_HANDLE,
-                                          NULL,
+                                          &g_fake_device,
                                           tbl->pUserData);
             wlog("  pfDeviceAttach returned %d", ok);
         } else {
