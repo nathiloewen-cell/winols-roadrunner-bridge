@@ -103,6 +103,8 @@ static FARPROC get_real(const char* name) {
 #define ID_PACKET_SIZE 448
 static BYTE g_id_packet[ID_PACKET_SIZE];
 
+static DWORD g_id_packet_mtime_lo = 0;  /* ftLastWriteTime.dwLowDateTime */
+
 static void load_id_packet(void) {
     /* Initialize with built-in placeholder */
     memset(g_id_packet, 0, ID_PACKET_SIZE);
@@ -116,12 +118,36 @@ static void load_id_packet(void) {
     }
 
     /* Try to load from file (fuzzer writes here) */
+    static const char ID_FILE[] = "C:\\dev\\winols-roadrunner-bridge\\tools\\id_packet.bin";
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExA(ID_FILE, GetFileExInfoStandard, &fa)) {
+        g_id_packet_mtime_lo = fa.ftLastWriteTime.dwLowDateTime;
+        FILE* f = NULL;
+        fopen_s(&f, ID_FILE, "rb");
+        if (f) {
+            size_t n = fread(g_id_packet, 1, ID_PACKET_SIZE, f);
+            fclose(f);
+            wlog("ID packet loaded from file (%zu bytes) first=[%02X %02X %02X %02X]",
+                 n, g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
+        }
+    }
+}
+
+/* Reload id_packet.bin if the file changed since last load. Called before each EP6 serve. */
+static void reload_id_packet_if_changed(void) {
+    static const char ID_FILE[] = "C:\\dev\\winols-roadrunner-bridge\\tools\\id_packet.bin";
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(ID_FILE, GetFileExInfoStandard, &fa)) return;
+    if (fa.ftLastWriteTime.dwLowDateTime == g_id_packet_mtime_lo) return;
+    /* File changed — reload */
+    g_id_packet_mtime_lo = fa.ftLastWriteTime.dwLowDateTime;
     FILE* f = NULL;
-    fopen_s(&f, "C:\\dev\\winols-roadrunner-bridge\\tools\\id_packet.bin", "rb");
+    fopen_s(&f, ID_FILE, "rb");
     if (f) {
         size_t n = fread(g_id_packet, 1, ID_PACKET_SIZE, f);
         fclose(f);
-        wlog("ID packet loaded from file (%zu bytes)", n);
+        wlog("ID packet RELOADED from file (%zu bytes) first=[%02X %02X %02X %02X]",
+             n, g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
     }
 }
 
@@ -175,6 +201,9 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
            Do NOT catch uncommitted pages — WinDriver legitimately allocates those.
            Native WinDriver pfDeviceAttach reads from low addresses due to WD16/WD11
            struct mismatch — the null guard catch handles this. */
+        /* Catch bad reads AND writes in null-guard and kernel ranges.
+           op=0: read violation, op=1: write violation. Both need handling for
+           WinLicense code that dereferences NULL after our XOR EAX,EAX patch. */
         BOOL is_bad = (fault < 0x10000 || fault >= 0x80000000);
 
         if (is_bad) {
@@ -213,7 +242,9 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         AddVectoredExceptionHandler(1, veh_handler);
         load_id_packet();
         log_init();
-        /* Startup attach is scheduled from load_real_dll() after symbols exist */
+        /* NOTE: Startup-attach removed — it caused a 37-second UI freeze.
+           pfDeviceAttach is now only fired from WDU_Init (Config OK click).
+           User flow: Miscellaneous → Configuration → USB (OLS300) → OK → connected. */
         /* Load real wdapi1100_real.dll — Roadrunner now has WinUSB driver
            so wdapi can find it natively. VEH handles any windrvr.sys init failures. */
         char path[MAX_PATH];
@@ -230,7 +261,27 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         /* Schedule startup pfDeviceAttach using fixed ols_32on32.exe addresses.
            Fire after 2s so WinOLS main window is ready.
            Works because ols_32on32.exe has no ASLR (packed exe = fixed base). */
-        schedule_startup_attach();
+        /* schedule_startup_attach(); — disabled: causes 37s UI freeze */
+
+        /* Patch1: NOP the 9-second WinLicense blocking call at 0x0052CECA.
+           This is SAFE — only applies if bytes match exactly.
+           With Patch1 + field_8=1 + buffer[2]=0x42: identification completes
+           without WDU_Uninit, Load/Disconnect becomes active. This was the
+           working configuration from session 02:23. */
+        {
+            BYTE* addr = (BYTE*)0x0052CECA;
+            DWORD old_prot = 0;
+            if (addr[0]==0xE8 && addr[1]==0x11 && addr[2]==0x3C &&
+                addr[3]==0x37 && addr[4]==0x00 &&
+                VirtualProtect(addr, 5, PAGE_EXECUTE_READWRITE, &old_prot)) {
+                addr[0]=addr[1]=addr[2]=addr[3]=addr[4]=0x90;
+                VirtualProtect(addr, 5, old_prot, &old_prot);
+                wlog("Patch1: 9s call at 0x0052CECA -> NOP x5");
+            } else {
+                wlog("Patch1 skip: 0x0052CECA = %02X %02X %02X %02X %02X",
+                     addr[0],addr[1],addr[2],addr[3],addr[4]);
+            }
+        }
     } else if (reason == DLL_PROCESS_DETACH) {
         wlog("wdapi proxy unloaded");
         log_close();
@@ -395,37 +446,47 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         wlog("  WDU_Init (real) -> 0x%08lX real_handle=%p",
              (unsigned long)r, real_handle);
         if (r == 0 && real_handle) {
-            /* WDU_Init succeeded with real wdapi1660, but the handle is WD16-format
-               and incompatible with WinOLS compiled for WD11. Fall through to fake mode
-               which uses WD11-compatible fake handle. Store real handle for WDU_Transfer. */
-            wlog("  WDU_Init real SUCCESS (handle=%p) but WD16/WD11 compat issue — using fake mode", real_handle);
-            g_attach_handle = NULL;  /* force fake mode to avoid WD11/WD16 crash */
-            /* Fall through to fake mode below */
-        }
-        if (r == 0 && real_handle) {
-            /* WDU_Init succeeded! Store real handle for WDU_Transfer forwarding.
-               WinOLS gets fake handle (no WD16/WD11 crash), but WDU_Transfer
-               uses the real handle → Roadrunner receives actual OLS300 commands! */
+            /* WDU_Init succeeded with real wdapi1660. Store real handle for
+               WDU_Transfer forwarding (real USB commands reach the device).
+               Give WinOLS a FAKE WD11-compatible handle to avoid WD16/WD11 crash.
+               Schedule our own pfDeviceAttach after 500ms — don't rely on real
+               WinDriver callback which can fire 30-60s late. */
             g_real_driver_handle = real_handle;
-            wlog("  Real handle stored for WDU_Transfer forwarding: %p", real_handle);
-            if (phDriver) *phDriver = real_handle;
-            wlog("  WDU_Init SUCCESS with real handle %p", real_handle);
+            wlog("  WDU_Init real SUCCESS: stored real=%p, giving WinOLS fake handle", real_handle);
+            if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
+            /* Initialize fake device structs (same as fallback path) */
+            g_config.Descriptor      = g_cfgdesc;
+            g_config.pInterfaces     = &g_iface;
+            g_config.dwNumInterfaces = 1;
+            memset(&g_fake_device, 0, sizeof(g_fake_device));
+            g_fake_device.Descriptor.bLength            = 18;
+            g_fake_device.Descriptor.bDescriptorType    = 1;
+            g_fake_device.Descriptor.bcdUSB             = 0x0200;
+            g_fake_device.Descriptor.idVendor           = OLS300_VID;
+            g_fake_device.Descriptor.idProduct          = OLS300_PID;
+            g_fake_device.Descriptor.bcdDevice          = 0x0100;
+            g_fake_device.Descriptor.bMaxPacketSize0    = 64;
+            g_fake_device.Descriptor.bNumConfigurations = 1;
+            g_fake_device.pConfigs       = &g_config;
+            g_fake_device.pActiveConfig  = &g_config;
+            for (int i = 0; i < WD_MAXDEVICES; i++)
+                g_fake_device.pActiveInterface[i] = &g_altset;
             if (pEventTable) {
                 WDU_EVENT_TABLE* tbl = (WDU_EVENT_TABLE*)pEventTable;
                 if (tbl->pfDeviceAttach) {
                     g_attach_cb       = tbl->pfDeviceAttach;
                     g_attach_userdata = tbl->pUserData;
-                    g_attach_handle   = real_handle;
-                    wlog("  Scheduling pfDeviceAttach with real handle + NULL device");
-                    HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
-                                             CREATE_SUSPENDED, NULL);
-                    if (ht) {
-                        SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
-                        ResumeThread(ht); CloseHandle(ht);
+                    g_attach_handle   = NULL;  /* fake device handle for WinOLS */
+                    wlog("  Scheduling pfDeviceAttach (500ms)...");
+                    HANDLE ht2 = CreateThread(NULL, 0, attach_thread, NULL,
+                                              CREATE_SUSPENDED, NULL);
+                    if (ht2) {
+                        SetThreadPriority(ht2, THREAD_PRIORITY_BELOW_NORMAL);
+                        ResumeThread(ht2); CloseHandle(ht2);
                     }
                 }
             }
-            return r;
+            return 0;
         }
         wlog("  WDU_Init failed (0x%08lX) — falling back to fake mode", (unsigned long)r);
     }
@@ -513,18 +574,20 @@ static DWORD WINAPI attach_thread(LPVOID param) {
 
 __declspec(dllexport)
 DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
-    wlog("WDU_Uninit(handle=%p)", hDriver);
-    /* After disconnect, re-trigger attach so WinOLS sees device reconnect.
-       This simulates the OLS300 device being present persistently.         */
-    if (g_attach_cb) {
-        HANDLE ht = CreateThread(NULL, 0, attach_thread, NULL,
-                                 CREATE_SUSPENDED, NULL);
-        if (ht) {
-            SetThreadPriority(ht, THREAD_PRIORITY_BELOW_NORMAL);
-            ResumeThread(ht);
-            CloseHandle(ht);
-        }
-    }
+    void** fp = (void**)__builtin_frame_address(0);
+    void** fp1 = fp ? (void**)*fp : NULL;
+    void** fp2 = fp1 ? (void**)*fp1 : NULL;
+    void* r0 = fp ? fp[1] : (void*)0;
+    void* r1 = fp1 ? fp1[1] : (void*)0;
+    void* r2 = fp2 ? fp2[1] : (void*)0;
+    wlog("WDU_Uninit(handle=%p) caller=0x%08X r1=0x%08X r2=0x%08X",
+         hDriver, (unsigned)r0, (unsigned)r1, (unsigned)r2);
+    /* Invalidate real handle — no longer valid after WDU_Uninit. */
+    g_real_driver_handle = NULL;
+    g_attach_handle = NULL;
+    /* NO re-attach: re-attaching triggers another 30s identification freeze.
+       WinOLS will call WDU_Init again when user clicks Config OK.
+       Without re-attach, the user gets one identification cycle per Config OK click. */
     return 0;
 }
 
@@ -542,24 +605,68 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
        Serve the g_id_packet buffer (448 bytes). Content is updated by Sprint 1
        firmware analysis. Currently a placeholder; will be replaced with correct bytes. */
     if (fRead && (dwPipeNum == 0x86 || dwPipeNum == 134) && pBuffer && dwBytes >= 16) {
-        /* Serve g_id_packet (loaded from tools/id_packet.bin or built-in placeholder).
-           The fuzzer tests different byte patterns by writing to id_packet.bin.
-           Bytes 8-N: firmware data, status flags, capabilities
-           Return enough data to make WinOLS accept the module. */
+        /* Auto-reload id_packet.bin if fuzzer changed it */
+        reload_id_packet_if_changed();
         DWORD give = dwBytes < ID_PACKET_SIZE ? dwBytes : ID_PACKET_SIZE;
         memcpy(pBuffer, g_id_packet, give);
         if (give < dwBytes)
             memset((BYTE*)pBuffer + give, 0, dwBytes - give);
         if (pdwBytesTransferred) *pdwBytesTransferred = give;
-        wlog("WDU_Transfer ID packet (pipe=0x%lX, %lu bytes) first=[%02X %02X %02X %02X]",
-             (unsigned long)dwPipeNum, (unsigned long)give,
-             g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
+        /* Set field_8=1 via stack walk (02:23 working config):
+           fp2 = EBP of identification function (0x0052CB44)
+           [EBP - 0x1DC] = OLS module object; object[8] = field_8 */
+        {
+            void** fp0 = (void**)__builtin_frame_address(0);
+            void** fp1 = fp0 ? (void**)*fp0 : NULL;
+            void** fp2 = fp1 ? (void**)*fp1 : NULL;
+            if (fp2) {
+                DWORD fp2_val = (DWORD)(uintptr_t)fp2;
+                if (fp2_val > 0x00100000 && fp2_val < 0x7F000000) {
+                    BYTE** op = (BYTE**)((BYTE*)fp2 - 0x1DC);
+                    DWORD ov = (DWORD)(uintptr_t)op;
+                    if (ov > 0x00100000 && ov < 0x7F000000) {
+                        BYTE* obj = *op;
+                        if ((DWORD)(uintptr_t)obj > 0x10000 &&
+                            (DWORD)(uintptr_t)obj < 0x7F000000 && obj[8] == 0) {
+                            obj[8] = 1;
+                            wlog("field_8=1: obj=%p", obj);
+                        }
+                    }
+                }
+            }
+        }
+        static int g_ep6_count = 0;
+        if (++g_ep6_count <= 3) {
+            wlog("WDU_Transfer ID pipe=0x%lX %lu bytes first=[%02X %02X %02X %02X]",
+                 (unsigned long)dwPipeNum, (unsigned long)give,
+                 g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
+        }
         return 0;
     }
 
-    /* Log other transfers for protocol discovery */
-    if (!fRead && pBuffer && dwBytes > 0)
+    /* Intercept ALL transfers in fake mode — no real USB device available.
+       TX: log for Sprint 3 protocol capture, fake success.
+       RX (non-EP6): return empty data immediately (no 3s WinDriver timeouts).
+       Forwarding to real wdapi causes 3s timeouts × N retries = UI freeze.       */
+    if (!fRead && pBuffer && dwBytes > 0) {
         log_hex("WDU_Transfer TX (OLS300 cmd)", pBuffer, dwBytes);
+        if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
+        return 0;
+    }
+    if (fRead && pBuffer && dwBytes > 0) {
+        /* Generic RX: return FTDI status bytes (0x01 0x60 = modem status ready).
+           Real FTDI always returns at least 2 status bytes on bulk IN even when empty.
+           Returning 0 bytes causes WinOLS to call WDU_Uninit prematurely (4s vs 30s).
+           With FTDI status bytes: WinOLS correctly recognizes device as ready/idle. */
+        if (dwBytes >= 2) {
+            ((BYTE*)pBuffer)[0] = 0x01;  /* FTDI modem status byte 1 */
+            ((BYTE*)pBuffer)[1] = 0x60;  /* FTDI modem status byte 2 (DSR/CTS ready) */
+            if (pdwBytesTransferred) *pdwBytesTransferred = 2;
+        } else {
+            if (pdwBytesTransferred) *pdwBytesTransferred = 0;
+        }
+        return 0;
+    }
 
     /* Forward to real wdapi1660 for non-read transfers */
     if (get_real("WDU_Transfer")) {
