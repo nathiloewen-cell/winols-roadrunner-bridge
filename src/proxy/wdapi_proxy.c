@@ -675,12 +675,15 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
            This tells WinOLS the OLS300 accepted the EP2 command and is ready for more.
            Without this, WinOLS sees "idle" state and stops after one EP2 exchange.
            Use byte[3]=g_ep2_out_count to signal processing state to WinOLS. */
-        if (g_ep2_out_count > 0 && give >= 4) {
+        if (g_ep2_out_count > 0 && give >= 6) {
             BYTE* buf = (BYTE*)pBuffer;
-            /* Keep byte[2]=0x42 (original ID value) — changing it breaks identification.
-               Set byte[3] = ep2_count to signal command was acknowledged. */
-            /* buf[2] = 0x42;  unchanged from id_packet */
+            /* After firmware check command (0x2E FE 1F 02):
+               EP6 bytes[4:5] must reflect firmware version 0x044A.
+               WinOLS reads EP6 AFTER EP2 check to confirm firmware version.
+               Without this, WinOLS sees wrong version and stops communication. */
             buf[3] = (BYTE)g_ep2_out_count;
+            buf[4] = 0x04;  /* firmware version high = 0x044A */
+            buf[5] = 0x4A;  /* firmware version low */
         }
         if (++g_ep6_count <= 5) {
             wlog("WDU_Transfer ID pipe=0x%lX %lu bytes first=[%02X %02X %02X %02X] ep2_count=%d",
