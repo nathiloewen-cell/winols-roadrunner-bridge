@@ -677,10 +677,9 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
            Use byte[3]=g_ep2_out_count to signal processing state to WinOLS. */
         if (g_ep2_out_count > 0 && give >= 4) {
             BYTE* buf = (BYTE*)pBuffer;
-            /* After EP2 firmware check: change byte[2] from 0x42 to 0x43
-               to signal "firmware loaded OK, ready for EPROM data transfer".
-               Without this transition WinOLS keeps waiting for firmware-ready state. */
-            buf[2] = 0x43;  /* 0x42 = identified, 0x43 = identified + firmware ready */
+            /* Keep byte[2]=0x42 (original ID value) — changing it breaks identification.
+               Set byte[3] = ep2_count to signal command was acknowledged. */
+            /* buf[2] = 0x42;  unchanged from id_packet */
             buf[3] = (BYTE)g_ep2_out_count;
         }
         if (++g_ep6_count <= 5) {
@@ -710,15 +709,22 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
         if (dwPipeNum == 0x82 || dwPipeNum == 2) {
             memset(pBuffer, 0, dwBytes);
             /* Response format depends on command:
-               64 bytes: firmware version check → return checksum 0x044A (little-endian)
-               8 bytes:  EPROM config query → return zeros (ACK)
-               other:    return zeros */
-            if (dwBytes == 64) {
-                /* Firmware version check: WinOLS reads (buf[1]<<8)|buf[0] = 0x044A */
-                ((BYTE*)pBuffer)[0] = 0x4A;  /* checksum LE low */
-                ((BYTE*)pBuffer)[1] = 0x04;  /* checksum LE high */
+               64 bytes: firmware version check (0x2E FE 1F 02...)
+                         → bytes 0,1 = checksum big-endian: (b0<<8)|b1 = 0x044A
+               8 bytes:  EPROM config query (0x20 0x30...) or register command
+                         → try echoing back buf[1] in byte[0] as ACK
+               other:    all zeros */
+            if (dwBytes == 64 && dwBytes > 1) {
+                /* Firmware version check: WinOLS reads (buf[0]<<8)|buf[1] = 0x044A */
+                ((BYTE*)pBuffer)[0] = 0x04;  /* checksum high byte */
+                ((BYTE*)pBuffer)[1] = 0x4A;  /* checksum low byte */
+            } else if (dwBytes == 8) {
+                /* EPROM config: echo command byte as ACK indicator */
+                /* Try: first byte = 0x30 (echoing the sub-command) */
+                ((BYTE*)pBuffer)[0] = 0x00;
+                ((BYTE*)pBuffer)[1] = 0x00;
             }
-            /* For 8-byte and other sizes: all zeros = ACK/success */
+            /* For other sizes: all zeros = ACK/success */
             if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
             wlog("WDU_Transfer EP2 IN pipe=0x%02lX %lu bytes -> fw_checksum=044A",
                  (unsigned long)dwPipeNum, (unsigned long)dwBytes);
