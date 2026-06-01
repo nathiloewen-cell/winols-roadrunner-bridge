@@ -263,11 +263,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
            Works because ols_32on32.exe has no ASLR (packed exe = fixed base). */
         /* schedule_startup_attach(); — disabled: causes 37s UI freeze */
 
-        /* Patch1: NOP the 9-second WinLicense blocking call at 0x0052CECA.
-           This is SAFE — only applies if bytes match exactly.
-           With Patch1 + field_8=1 + buffer[2]=0x42: identification completes
-           without WDU_Uninit, Load/Disconnect becomes active. This was the
-           working configuration from session 02:23. */
+        /* Patch1: NOP the 9-second WinLicense blocking call at 0x0052CECA. */
         {
             BYTE* addr = (BYTE*)0x0052CECA;
             DWORD old_prot = 0;
@@ -277,11 +273,14 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
                 addr[0]=addr[1]=addr[2]=addr[3]=addr[4]=0x90;
                 VirtualProtect(addr, 5, old_prot, &old_prot);
                 wlog("Patch1: 9s call at 0x0052CECA -> NOP x5");
-            } else {
-                wlog("Patch1 skip: 0x0052CECA = %02X %02X %02X %02X %02X",
-                     addr[0],addr[1],addr[2],addr[3],addr[4]);
             }
         }
+        /* Patch2: TODO - find correct blocking call address for Hardware Config hang.
+           Patch2 attempt (JE→JMP at 0x005FA829/83D/851) was REVERTED:
+           skipping those calls causes WinOLS to spin at 100% CPU indefinitely.
+           Those calls include necessary timing code for WinLicense.
+           Workaround: use automation (full_flow.py) which clicks OK from Colours tab,
+           naturally skipping the Hardware-specific 8-minute WinLicense path. */
     } else if (reason == DLL_PROCESS_DETACH) {
         wlog("wdapi proxy unloaded");
         log_close();
@@ -578,15 +577,14 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     wlog("[attach] pfDeviceAttach returned %d", ok);
 
     /* Second pfDeviceAttach at +3s — activates Load/Disconnect button in WinOLS.
-       From working session 02:23: the SECOND attach was what made Load active.
-       IMPORTANT: must use a DIFFERENT handle so WinOLS sees it as a new device.
-       First attach starts EP6 identification; second attach transitions to "loaded" state. */
-    if (ok && g_attach_cb) {
+       IMPORTANT: fire only ONCE (static flag). Without this, second attach causes
+       WinOLS to trigger WDU_Uninit → 8-min WinLicense loop → infinite cycle. */
+    static volatile LONG g_attach2_fired = 0;
+    if (ok && g_attach_cb && InterlockedCompareExchange(&g_attach2_fired, 1, 0) == 0) {
         Sleep(3000);
-        if (g_attach_cb) {  /* check again after sleep — Uninit might have cleared it */
-            /* Use different fake handle so WinOLS processes this as a new device event */
+        if (g_attach_cb) {
             WDU_DEVICE_HANDLE handle2 = (WDU_DEVICE_HANDLE)g_fake_stream_data;
-            wlog("[attach2] Firing second pfDeviceAttach handle=%p (different from first)...", handle2);
+            wlog("[attach2] Firing second pfDeviceAttach handle=%p (once only)...", handle2);
             BOOL ok2 = g_attach_cb(handle2, use_device, g_attach_userdata);
             wlog("[attach2] second pfDeviceAttach returned %d", ok2);
         }
@@ -632,7 +630,7 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
         g_ep2_out_count++;
     /* Log ALL transfers (rate-limited after 300) */
     static int g_all_count = 0;
-    if (++g_all_count <= 300)
+    if (++g_all_count <= 2000)
         wlog("WDU_Transfer pipe=0x%02lX %s %lu bytes",
              (unsigned long)dwPipeNum, fRead?"IN":"OUT", (unsigned long)dwBytes);
     if (!fRead && pBuffer && dwBytes > 0)
@@ -679,8 +677,10 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
            Use byte[3]=g_ep2_out_count to signal processing state to WinOLS. */
         if (g_ep2_out_count > 0 && give >= 4) {
             BYTE* buf = (BYTE*)pBuffer;
-            /* Keep bytes 0,1,2 same (55 AA 42) but set byte[3] = processed count
-               to signal the OLS300 acknowledged the EP2 command */
+            /* After EP2 firmware check: change byte[2] from 0x42 to 0x43
+               to signal "firmware loaded OK, ready for EPROM data transfer".
+               Without this transition WinOLS keeps waiting for firmware-ready state. */
+            buf[2] = 0x43;  /* 0x42 = identified, 0x43 = identified + firmware ready */
             buf[3] = (BYTE)g_ep2_out_count;
         }
         if (++g_ep6_count <= 5) {
@@ -703,12 +703,24 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
         return 0;
     }
     if (fRead && pBuffer && dwBytes > 0) {
-        /* EP2 IN (pipe 0x82): OLS300 ACK response after EP2 OUT command.
-           Return all-zeros (ACK/success) so WinOLS continues sending data. */
+        /* EP2 IN (pipe 0x82): OLS300 ACK/firmware version response.
+           WinOLS checks firmware checksum after sending 0x2E FE 1F 02 command.
+           Expected checksum: 0x044A. Response bytes [0..1] = 0x04 0x4A to pass check.
+           Without this, WinOLS uploads the entire 8051 firmware every session. */
         if (dwPipeNum == 0x82 || dwPipeNum == 2) {
             memset(pBuffer, 0, dwBytes);
+            /* Response format depends on command:
+               64 bytes: firmware version check → return checksum 0x044A (little-endian)
+               8 bytes:  EPROM config query → return zeros (ACK)
+               other:    return zeros */
+            if (dwBytes == 64) {
+                /* Firmware version check: WinOLS reads (buf[1]<<8)|buf[0] = 0x044A */
+                ((BYTE*)pBuffer)[0] = 0x4A;  /* checksum LE low */
+                ((BYTE*)pBuffer)[1] = 0x04;  /* checksum LE high */
+            }
+            /* For 8-byte and other sizes: all zeros = ACK/success */
             if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
-            wlog("WDU_Transfer EP2 IN (ACK) pipe=0x%02lX %lu bytes -> zeros",
+            wlog("WDU_Transfer EP2 IN pipe=0x%02lX %lu bytes -> fw_checksum=044A",
                  (unsigned long)dwPipeNum, (unsigned long)dwBytes);
             return 0;
         }
