@@ -400,6 +400,8 @@ static WDU_ATTACH_CALLBACK g_attach_cb         = NULL;
 static PVOID               g_attach_userdata   = NULL;
 static WDU_DEVICE_HANDLE   g_attach_handle     = NULL;
 static WDU_DRIVER_HANDLE   g_real_driver_handle = NULL; /* real wdapi1660 handle */
+/* Global buffer for real_init output — avoids stack corruption from __stdcall mismatch */
+static WDU_DRIVER_HANDLE   g_real_init_out     = NULL;
 
 /* ── Startup attach: fire pfDeviceAttach at fixed ols_32on32.exe addr ── */
 /* ols_32on32.exe has no ASLR: pfDeviceAttach=0x005FA860, userData=0x01A99544 */
@@ -440,19 +442,25 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
         if (open_r != 0) open_r = real_open(0, "12345abcde1234.license");
         wlog("  WDC_DriverOpen -> 0x%08lX", (unsigned long)open_r);
 
-        WDU_DRIVER_HANDLE real_handle = NULL;
-        DWORD r = real_init(&real_handle, pMatchTables, dwNumMatchTables,
+        /* Use global buffer to avoid stack corruption from calling convention mismatch */
+        g_real_init_out = NULL;
+        DWORD r = real_init(&g_real_init_out, pMatchTables, dwNumMatchTables,
                             pEventTable, "12345abcde1234.license", dwOptions);
         wlog("  WDU_Init (real) -> 0x%08lX real_handle=%p",
-             (unsigned long)r, real_handle);
-        if (r == 0 && real_handle) {
+             (unsigned long)r, g_real_init_out);
+        /* Store handle in global for cleanup — global is not stack-corrupted */
+        if (r == 0 && g_real_init_out != NULL) {
+            g_real_driver_handle = g_real_init_out;
+            wlog("  g_real_driver_handle stored: %p", g_real_driver_handle);
+        }
+        if (r == 0 && g_real_init_out) {
             /* WDU_Init succeeded with real wdapi1660. Store real handle for
                WDU_Transfer forwarding (real USB commands reach the device).
                Give WinOLS a FAKE WD11-compatible handle to avoid WD16/WD11 crash.
                Schedule our own pfDeviceAttach after 500ms — don't rely on real
                WinDriver callback which can fire 30-60s late. */
-            g_real_driver_handle = real_handle;
-            wlog("  WDU_Init real SUCCESS: stored real=%p, giving WinOLS fake handle", real_handle);
+            g_real_driver_handle = g_real_init_out;
+            wlog("  WDU_Init real SUCCESS: stored real=%p, giving WinOLS fake handle", g_real_init_out);
             if (phDriver) *phDriver = FAKE_DRIVER_HANDLE;
             /* Initialize fake device structs (same as fallback path) */
             g_config.Descriptor      = g_cfgdesc;
@@ -538,7 +546,7 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
 
 static DWORD WINAPI attach_thread(LPVOID param) {
     (void)param;
-    Sleep(2000);  /* 2s: wait for WinOLS main window + hardware init */
+    Sleep(500);  /* 500ms: first attach — triggers EP6 identification polling */
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
 
@@ -567,8 +575,22 @@ static DWORD WINAPI attach_thread(LPVOID param) {
                                      : use_handle;
     wlog("[attach] Using safe_handle=%p for callback", safe_handle);
     BOOL ok = g_attach_cb(safe_handle, use_device, g_attach_userdata);
-
     wlog("[attach] pfDeviceAttach returned %d", ok);
+
+    /* Second pfDeviceAttach at +3s — activates Load/Disconnect button in WinOLS.
+       From working session 02:23: the SECOND attach was what made Load active.
+       IMPORTANT: must use a DIFFERENT handle so WinOLS sees it as a new device.
+       First attach starts EP6 identification; second attach transitions to "loaded" state. */
+    if (ok && g_attach_cb) {
+        Sleep(3000);
+        if (g_attach_cb) {  /* check again after sleep — Uninit might have cleared it */
+            /* Use different fake handle so WinOLS processes this as a new device event */
+            WDU_DEVICE_HANDLE handle2 = (WDU_DEVICE_HANDLE)g_fake_stream_data;
+            wlog("[attach2] Firing second pfDeviceAttach handle=%p (different from first)...", handle2);
+            BOOL ok2 = g_attach_cb(handle2, use_device, g_attach_userdata);
+            wlog("[attach2] second pfDeviceAttach returned %d", ok2);
+        }
+    }
     return 0;
 }
 
@@ -582,12 +604,18 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
     void* r2 = fp2 ? fp2[1] : (void*)0;
     wlog("WDU_Uninit(handle=%p) caller=0x%08X r1=0x%08X r2=0x%08X",
          hDriver, (unsigned)r0, (unsigned)r1, (unsigned)r2);
-    /* Invalidate real handle — no longer valid after WDU_Uninit. */
-    g_real_driver_handle = NULL;
+    /* Close the real wdapi session so the next WDU_Init can open cleanly. */
+    if (g_real_driver_handle) {
+        typedef DWORD (__cdecl *FN)(WDU_DRIVER_HANDLE);
+        FN fn = (FN)get_real("WDU_Uninit");
+        if (fn) {
+            DWORD r = fn(g_real_driver_handle);
+            wlog("  real WDU_Uninit -> 0x%08lX", (unsigned long)r);
+        }
+        g_real_driver_handle = NULL;
+    }
     g_attach_handle = NULL;
-    /* NO re-attach: re-attaching triggers another 30s identification freeze.
-       WinOLS will call WDU_Init again when user clicks Config OK.
-       Without re-attach, the user gets one identification cycle per Config OK click. */
+    g_attach_cb = NULL;
     return 0;
 }
 
@@ -598,6 +626,11 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                             DWORD dwOptions, void* pBuffer,
                             DWORD dwBytes, DWORD* pdwBytesTransferred,
                             BYTE* pSetupPacket, DWORD dwTimeout) {
+    /* Log ALL transfers (rate-limited after 200 to avoid huge log) */
+    static int g_all_count = 0;
+    if (++g_all_count <= 200)
+        wlog("WDU_Transfer pipe=0x%02lX %s %lu bytes",
+             (unsigned long)dwPipeNum, fRead?"IN":"OUT", (unsigned long)dwBytes);
     if (!fRead && pBuffer && dwBytes > 0)
         log_hex("WDU_Transfer TX", pBuffer, dwBytes);
 
