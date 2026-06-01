@@ -626,9 +626,13 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                             DWORD dwOptions, void* pBuffer,
                             DWORD dwBytes, DWORD* pdwBytesTransferred,
                             BYTE* pSetupPacket, DWORD dwTimeout) {
-    /* Log ALL transfers (rate-limited after 200 to avoid huge log) */
+    /* Track EP2 OUT command count for EP6 state machine */
+    static int g_ep2_out_count = 0;
+    if (!fRead && (dwPipeNum == 0x02 || dwPipeNum == 2) && pBuffer && dwBytes > 0)
+        g_ep2_out_count++;
+    /* Log ALL transfers (rate-limited after 300) */
     static int g_all_count = 0;
-    if (++g_all_count <= 200)
+    if (++g_all_count <= 300)
         wlog("WDU_Transfer pipe=0x%02lX %s %lu bytes",
              (unsigned long)dwPipeNum, fRead?"IN":"OUT", (unsigned long)dwBytes);
     if (!fRead && pBuffer && dwBytes > 0)
@@ -669,10 +673,22 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
             }
         }
         static int g_ep6_count = 0;
-        if (++g_ep6_count <= 3) {
-            wlog("WDU_Transfer ID pipe=0x%lX %lu bytes first=[%02X %02X %02X %02X]",
+        /* After EP2 commands: modify EP6 to signal "command processed / ready".
+           This tells WinOLS the OLS300 accepted the EP2 command and is ready for more.
+           Without this, WinOLS sees "idle" state and stops after one EP2 exchange.
+           Use byte[3]=g_ep2_out_count to signal processing state to WinOLS. */
+        if (g_ep2_out_count > 0 && give >= 4) {
+            BYTE* buf = (BYTE*)pBuffer;
+            /* Keep bytes 0,1,2 same (55 AA 42) but set byte[3] = processed count
+               to signal the OLS300 acknowledged the EP2 command */
+            buf[3] = (BYTE)g_ep2_out_count;
+        }
+        if (++g_ep6_count <= 5) {
+            wlog("WDU_Transfer ID pipe=0x%lX %lu bytes first=[%02X %02X %02X %02X] ep2_count=%d",
                  (unsigned long)dwPipeNum, (unsigned long)give,
-                 g_id_packet[0], g_id_packet[1], g_id_packet[2], g_id_packet[3]);
+                 ((BYTE*)pBuffer)[0], ((BYTE*)pBuffer)[1],
+                 ((BYTE*)pBuffer)[2], ((BYTE*)pBuffer)[3],
+                 g_ep2_out_count);
         }
         return 0;
     }
@@ -687,13 +703,20 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
         return 0;
     }
     if (fRead && pBuffer && dwBytes > 0) {
-        /* Generic RX: return FTDI status bytes (0x01 0x60 = modem status ready).
-           Real FTDI always returns at least 2 status bytes on bulk IN even when empty.
-           Returning 0 bytes causes WinOLS to call WDU_Uninit prematurely (4s vs 30s).
-           With FTDI status bytes: WinOLS correctly recognizes device as ready/idle. */
+        /* EP2 IN (pipe 0x82): OLS300 ACK response after EP2 OUT command.
+           Return all-zeros (ACK/success) so WinOLS continues sending data. */
+        if (dwPipeNum == 0x82 || dwPipeNum == 2) {
+            memset(pBuffer, 0, dwBytes);
+            if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
+            wlog("WDU_Transfer EP2 IN (ACK) pipe=0x%02lX %lu bytes -> zeros",
+                 (unsigned long)dwPipeNum, (unsigned long)dwBytes);
+            return 0;
+        }
+        /* Generic RX (EP6 already handled above): return FTDI status bytes.
+           EP6 polling: WinOLS keeps connection alive without timing out. */
         if (dwBytes >= 2) {
-            ((BYTE*)pBuffer)[0] = 0x01;  /* FTDI modem status byte 1 */
-            ((BYTE*)pBuffer)[1] = 0x60;  /* FTDI modem status byte 2 (DSR/CTS ready) */
+            ((BYTE*)pBuffer)[0] = 0x01;
+            ((BYTE*)pBuffer)[1] = 0x60;
             if (pdwBytesTransferred) *pdwBytesTransferred = 2;
         } else {
             if (pdwBytesTransferred) *pdwBytesTransferred = 0;
