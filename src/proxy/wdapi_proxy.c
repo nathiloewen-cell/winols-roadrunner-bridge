@@ -23,6 +23,110 @@
 #include <stdarg.h>
 #include <time.h>
 
+/* Forward declaration for wlog (defined later in this file) */
+static void wlog(const char* fmt, ...);
+
+/* Sprint 3: include crypto constants (BASE_KEY, SHIFTS, TOKENS, EXTRA0) */
+#include "rr_crypto.h"
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * SPRINT 3: MoatesWare Load Bridge
+ * Intercepts OLS300 DMA pointer commands, reads ECU data from WinOLS
+ * memory (we are IN-PROCESS in WinOLS), writes to Roadrunner via COM.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* MoatesWare protocol */
+#define RR_CMD_WRITE      0x57   /* 'W' BulkWrite */
+#define RR_ACK            0x06   /* ACK byte */
+#define RR_BAUD           115200
+#define RR_TIMEOUT_MS     5000
+#define RR_DEFAULT_PORT   "COM13"  /* TTL adapter (fixed after EEPROM repair) */
+
+static HANDLE g_rr_com = INVALID_HANDLE_VALUE;
+
+static BYTE rr_checksum(const BYTE* data, DWORD len) {
+    BYTE cs = 0;
+    for (DWORD i = 0; i < len; i++) cs ^= data[i];
+    return cs;
+}
+
+static BOOL rr_open(const char* portname) {
+    char path[32];
+    _snprintf(path, sizeof(path), "\\\\.\\%s", portname);
+    HANDLE h = CreateFileA(path, GENERIC_READ|GENERIC_WRITE, 0, NULL,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        wlog("RR: open %s failed: %lu", portname, GetLastError());
+        return FALSE;
+    }
+    DCB dcb = {0}; dcb.DCBlength = sizeof(dcb);
+    GetCommState(h, &dcb);
+    dcb.BaudRate = RR_BAUD; dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE; dcb.fDtrControl = DTR_CONTROL_ENABLE;
+    dcb.fRtsControl = RTS_CONTROL_ENABLE;
+    SetCommState(h, &dcb);
+    COMMTIMEOUTS to = {50, 2, RR_TIMEOUT_MS, 2, RR_TIMEOUT_MS};
+    SetCommTimeouts(h, &to);
+    PurgeComm(h, PURGE_RXCLEAR|PURGE_TXCLEAR);
+    g_rr_com = h;
+    wlog("RR: opened %s at %d baud", portname, RR_BAUD);
+    return TRUE;
+}
+
+static void rr_close(void) {
+    if (g_rr_com != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_rr_com); g_rr_com = INVALID_HANDLE_VALUE;
+        wlog("RR: closed");
+    }
+}
+
+/* MoatesWare BulkWrite: [CMD_W][addr_hi][addr_lo][size_hi][size_lo][data...][checksum] → ACK */
+static BOOL rr_bulk_write(WORD addr, WORD size, const BYTE* data) {
+    if (g_rr_com == INVALID_HANDLE_VALUE) return FALSE;
+    if ((addr & 0xFF) || (size & 0xFF)) {
+        wlog("RR: BulkWrite alignment error addr=0x%04X size=0x%04X", addr, size);
+        return FALSE;
+    }
+    BYTE hdr[5] = {RR_CMD_WRITE, (BYTE)(addr>>8), (BYTE)(addr&0xFF),
+                   (BYTE)(size>>8), (BYTE)(size&0xFF)};
+    BYTE cs = rr_checksum(data, size);
+    DWORD written = 0;
+    WriteFile(g_rr_com, hdr, 5, &written, NULL);
+    WriteFile(g_rr_com, data, size, &written, NULL);
+    WriteFile(g_rr_com, &cs, 1, &written, NULL);
+    /* Wait for ACK */
+    BYTE ack = 0; DWORD got = 0;
+    ReadFile(g_rr_com, &ack, 1, &got, NULL);
+    if (got != 1 || ack != RR_ACK) {
+        wlog("RR: BulkWrite addr=0x%04X size=0x%04X NAK/timeout got=%lu byte=0x%02X",
+             addr, size, (unsigned long)got, ack);
+        return FALSE;
+    }
+    wlog("RR: BulkWrite addr=0x%04X size=0x%04X OK", addr, size);
+    return TRUE;
+}
+
+/* Autodetect Roadrunner: try known ports first */
+static BOOL rr_autodetect(void) {
+    const char* ports[] = {"COM13","COM11","COM12","COM14","COM15",NULL};
+    for (int i = 0; ports[i]; i++) {
+        if (rr_open(ports[i])) return TRUE;
+    }
+    /* Try COM1-COM20 */
+    for (int n = 1; n <= 20; n++) {
+        char name[16]; _snprintf(name, sizeof(name), "COM%d", n);
+        if (rr_open(name)) return TRUE;
+    }
+    wlog("RR: autodetect failed");
+    return FALSE;
+}
+
+/* Sprint 3 bridge state */
+static DWORD g_dma_start_addr = 0;   /* WinOLS ECU data VA (from cmd 1E 28) */
+static DWORD g_dma_size = 0x8000;    /* default 32KB; updated from project */
+static volatile BOOL g_bridge_done = FALSE;
+
 /* ── Logger (reuse pattern from ftd2xx proxy) ────────────────────────── */
 static FILE* g_log = NULL;
 static CRITICAL_SECTION g_cs;
@@ -257,6 +361,14 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
             wlog("wdapi proxy loaded (REAL DLL mode — WinUSB device active)");
         } else {
             wlog("wdapi proxy loaded (standalone fallback — real DLL not found)");
+        }
+        /* Sprint 3: Try to open Roadrunner COM port at startup.
+           Roadrunner must be connected BEFORE WinOLS starts.
+           If not found now, bridge will not work during Load. */
+        if (rr_autodetect()) {
+            wlog("S3: Roadrunner connected — Load Bridge ready");
+        } else {
+            wlog("S3: Roadrunner NOT found — connect it and restart WinOLS");
         }
         /* Schedule startup pfDeviceAttach using fixed ols_32on32.exe addresses.
            Fire after 2s so WinOLS main window is ready.
@@ -701,6 +813,68 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
        Forwarding to real wdapi causes 3s timeouts × N retries = UI freeze.       */
     if (!fRead && pBuffer && dwBytes > 0) {
         log_hex("WDU_Transfer TX (OLS300 cmd)", pBuffer, dwBytes);
+
+        /* ── Sprint 3: Load Bridge ───────────────────────────────────────
+           Parse OLS300 DMA pointer commands and write ECU data to Roadrunner.
+           We are IN-PROCESS in WinOLS so we can read its VA directly.      */
+        BYTE* cmd = (BYTE*)pBuffer;
+        if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x28) {
+            /* Command 0x1E 0x28: WinOLS sets DMA pointer to ECU data.
+               bytes[4..7] = LE 32-bit VA in WinOLS process memory.
+               Since our DLL runs inside WinOLS, we can dereference this directly. */
+            DWORD va = ((DWORD)cmd[4]) | ((DWORD)cmd[5]<<8) |
+                       ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
+            g_dma_start_addr = va;
+            g_bridge_done = FALSE;
+            wlog("S3: DMA addr=0x%08lX size=0x%04X", (unsigned long)va, (unsigned)g_dma_size);
+
+            if (g_rr_com != INVALID_HANDLE_VALUE && va > 0x10000 && !g_bridge_done) {
+                BYTE* ecuData = (BYTE*)(uintptr_t)va;
+                DWORD total_blocks = (g_dma_size + 255) / 256;
+                wlog("S3: Writing %lu blocks to Roadrunner (power-cycled = shift[0]=0)...",
+                     (unsigned long)total_blocks);
+                int ok = 1;
+                /* Open COM port with correct serial settings for Roadrunner */
+                DCB dcb2 = {0}; dcb2.DCBlength = sizeof(dcb2);
+                GetCommState(g_rr_com, &dcb2);
+                dcb2.BaudRate = RR_BAUD;
+                dcb2.ByteSize = 8; dcb2.Parity = NOPARITY; dcb2.StopBits = ONESTOPBIT;
+                dcb2.fBinary = TRUE; dcb2.fDtrControl = DTR_CONTROL_ENABLE;
+                dcb2.fRtsControl = RTS_CONTROL_ENABLE;
+                SetCommState(g_rr_com, &dcb2);
+                COMMTIMEOUTS to2 = {50, 2, 5000, 2, 5000};
+                SetCommTimeouts(g_rr_com, &to2);
+                PurgeComm(g_rr_com, PURGE_RXCLEAR|PURGE_TXCLEAR);
+
+                for (DWORD blk = 0; blk < total_blocks && ok; blk++) {
+                    BYTE plain[256] = {0};
+                    DWORD off = blk * 256;
+                    DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                    memcpy(plain, ecuData + off, copy);
+                    ok = rr_write_block_com(g_rr_com, (int)blk, plain);
+                    if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                }
+                if (ok) {
+                    g_bridge_done = TRUE;
+                    wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks → Roadrunner",
+                         (unsigned long)total_blocks);
+                } else {
+                    wlog("S3: Write FAILED");
+                }
+            } else if (g_rr_com == INVALID_HANDLE_VALUE) {
+                wlog("S3: Roadrunner nicht verbunden — COM-Port nicht offen");
+            }
+        }
+        if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x2C) {
+            DWORD va2 = ((DWORD)cmd[4]) | ((DWORD)cmd[5]<<8) |
+                        ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
+            /* Update size: distance between DMA ptr1 and ptr2 = one segment size */
+            if (g_dma_start_addr > 0 && va2 > g_dma_start_addr)
+                g_dma_size = va2 - g_dma_start_addr;
+            wlog("S3: DMA ptr2=0x%08lX size=0x%04X", (unsigned long)va2, (unsigned)g_dma_size);
+        }
+        /* ── End Sprint 3 ─────────────────────────────────────────────── */
+
         if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
         return 0;
     }
