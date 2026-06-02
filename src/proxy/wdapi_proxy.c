@@ -137,6 +137,9 @@ static volatile BOOL g_bridge_done = FALSE;
 static DWORD g_rom_base = 0;         /* actual Windows VA of ROM start (scan result) */
 static volatile BOOL g_dma_ready = FALSE;  /* set by 1E 2C — data is confirmed ready */
 static volatile int  g_scan_done = 0;      /* memory scan completed flag */
+static volatile int  g_hw_check_done = 0; /* 0=init, 1=hw_check done, >1=ep6 reads after */
+static BYTE*         g_ols_obj = NULL;    /* OLS module Delphi object ptr */
+static volatile LONG g_attach2_fired_g = 0; /* global — reset by WDU_Uninit for reconnect */
 
 /* ── Logger (reuse pattern from ftd2xx proxy) ────────────────────────── */
 static FILE* g_log = NULL;
@@ -718,10 +721,9 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     wlog("[attach] pfDeviceAttach returned %d", ok);
 
     /* Second pfDeviceAttach at +3s — activates Load/Disconnect button in WinOLS.
-       IMPORTANT: fire only ONCE (static flag). Without this, second attach causes
-       WinOLS to trigger WDU_Uninit → 8-min WinLicense loop → infinite cycle. */
-    static volatile LONG g_attach2_fired = 0;
-    if (ok && g_attach_cb && InterlockedCompareExchange(&g_attach2_fired, 1, 0) == 0) {
+       Use global g_attach2_fired_g so WDU_Uninit can reset it for reconnect
+       (Config→Hardware→OK path causes WDU_Uninit+WDU_Init cycle).            */
+    if (ok && g_attach_cb && InterlockedCompareExchange(&g_attach2_fired_g, 1, 0) == 0) {
         Sleep(3000);
         if (g_attach_cb) {
             WDU_DEVICE_HANDLE handle2 = (WDU_DEVICE_HANDLE)g_fake_stream_data;
@@ -755,6 +757,42 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
     }
     g_attach_handle = NULL;
     g_attach_cb = NULL;
+    /* Reset flags for reconnect */
+    InterlockedExchange(&g_attach2_fired_g, 0);
+    g_hw_check_done = 0;
+
+    /* Log bytes at caller address to find blocking code */
+    if (r0 > (void*)0x00400000 && r0 < (void*)0x00900000) {
+        BYTE* ret_code = (BYTE*)(uintptr_t)r0;
+        wlog("WDU_Uninit: caller=0x%p bytes_after=[%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X]",
+             r0,
+             ret_code[0],ret_code[1],ret_code[2],ret_code[3],ret_code[4],
+             ret_code[5],ret_code[6],ret_code[7],ret_code[8],ret_code[9]);
+        /* Also look at r1 (caller's caller) */
+        if (r1 > (void*)0x00400000 && r1 < (void*)0x00900000) {
+            BYTE* ret1 = (BYTE*)(uintptr_t)r1;
+            wlog("WDU_Uninit: r1=0x%p bytes_after=[%02X %02X %02X %02X %02X %02X %02X %02X]",
+                 r1, ret1[0],ret1[1],ret1[2],ret1[3],ret1[4],ret1[5],ret1[6],ret1[7]);
+        }
+    }
+
+    /* Patch3: after WDU_Uninit, zero [0x01FF9558] so JZ at 0x005FA829 is taken.
+       Code at 0x005FA822: CMP [0x01FF9558],0 / JZ → if non-zero: spin loop.
+       This value is the WDU_DRIVER_HANDLE stored by WinOLS.
+       Setting to 0 makes WinOLS believe handle is already released. */
+    {
+        volatile DWORD* handle_ptr = (volatile DWORD*)0x01FF9558u;
+        if ((DWORD)(uintptr_t)handle_ptr > 0x00400000 &&
+            (DWORD)(uintptr_t)handle_ptr < 0x7F000000) {
+            DWORD old_val = *handle_ptr;
+            *handle_ptr = 0;
+            wlog("Patch3: [0x01FF9558] 0x%08lX → 0x00000000 (stops JNZ spin loop)",
+                 (unsigned long)old_val);
+        }
+    }
+
+    /* No reconnect scheduling here — WinOLS will call WDU_Init separately.
+       Our Patch3 above zeroed the handle so the spin loop is avoided.         */
     return 0;
 }
 
@@ -805,7 +843,14 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                         if ((DWORD)(uintptr_t)obj > 0x10000 &&
                             (DWORD)(uintptr_t)obj < 0x7F000000 && obj[8] == 0) {
                             obj[8] = 1;
-                            wlog("field_8=1: obj=%p", obj);
+                            g_ols_obj = obj;  /* save for further field setting */
+                            wlog("field_8=1: obj=%p fields[0..0x20]: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X",
+                                 obj,
+                                 obj[0],obj[1],obj[2],obj[3],obj[4],obj[5],obj[6],obj[7],
+                                 obj[8],obj[9],obj[10],obj[11],obj[12],obj[13],obj[14],obj[15],
+                                 obj[16],obj[17],obj[18],obj[19],obj[20],obj[21],obj[22],obj[23],
+                                 obj[24],obj[25],obj[26],obj[27],obj[28],obj[29],obj[30],obj[31],
+                                 obj[32],obj[33]);
                         }
                     }
                 }
@@ -816,6 +861,41 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
            This tells WinOLS the OLS300 accepted the EP2 command and is ready for more.
            Without this, WinOLS sees "idle" state and stops after one EP2 exchange.
            Use byte[3]=g_ep2_out_count to signal processing state to WinOLS. */
+        /* OLS300 EP6 state machine (simulates FX2 firmware behavior):
+           Phase A: byte[2]=0x00 for first 30 reads (~2s) — firmware init
+           Phase B: byte[2]=0x42 → WinOLS sends 20 30 (hardware check)
+           Phase C: after 20 30→01: byte[2]=0x42 continues (init complete)
+           The transition 0x00→0x42 TRIGGERS WinOLS to send the 20 30 cmd. */
+        if (give >= 3) {
+            if (g_ep6_count <= 30 && g_hw_check_done == 0) {
+                ((BYTE*)pBuffer)[2] = 0x00;  /* Phase A: startup, wait */
+            } else {
+                ((BYTE*)pBuffer)[2] = 0x42;  /* Phase B/C: firmware ready */
+            }
+        }
+        if (g_hw_check_done > 0) {
+            g_hw_check_done++;
+            /* Also try setting more OLS object fields if we have the pointer */
+            if (g_hw_check_done == 21) {
+                /* Log call stack to find WinOLS function in EP6 polling loop */
+                void** fp0 = (void**)__builtin_frame_address(0);
+                void** fp1 = fp0 ? (void**)*fp0 : NULL;
+                void** fp2 = fp1 ? (void**)*fp1 : NULL;
+                void** fp3 = fp2 ? (void**)*fp2 : NULL;
+                wlog("EP6 polling caller stack: ret0=%p ret1=%p ret2=%p ret3=%p",
+                     fp0?fp0[1]:0, fp1?fp1[1]:0, fp2?fp2[1]:0, fp3?fp3[1]:0);
+                /* Also try setting more OLS object fields */
+                if (g_ols_obj) {
+                    g_ols_obj[0x09]=1; g_ols_obj[0x0A]=1; g_ols_obj[0x0B]=1;
+                    g_ols_obj[0x11]=1; g_ols_obj[0x12]=1;
+                    wlog("OLS obj[0..0x20] now: %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X %02X%02X%02X%02X",
+                         g_ols_obj[0],g_ols_obj[1],g_ols_obj[2],g_ols_obj[3],
+                         g_ols_obj[4],g_ols_obj[5],g_ols_obj[6],g_ols_obj[7],
+                         g_ols_obj[8],g_ols_obj[9],g_ols_obj[10],g_ols_obj[11],
+                         g_ols_obj[12],g_ols_obj[13],g_ols_obj[14],g_ols_obj[15]);
+                }
+            }
+        }
         if (g_ep2_out_count > 0 && give >= 6) {
             BYTE* buf = (BYTE*)pBuffer;
             /* After firmware check command (0x2E FE 1F 02):
@@ -884,7 +964,7 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
             /* Trigger write NOW if 1E 2C already arrived (g_dma_ready) */
             if (g_rom_base && g_dma_ready && g_bridge_done &&
                 g_rr_com != INVALID_HANDLE_VALUE) {
-                BYTE* ecuData = (BYTE*)(uintptr_t)(g_rom_base + g_dma_start_addr);
+                BYTE* ecuData = (BYTE*)(uintptr_t)g_rom_base; /* ROM[0] not ROM[dma_offset] */
                 DWORD total = (g_dma_size + 255) / 256;
                 wlog("S3: MEM SCAN → Write %lu Blocks, plain[0:4]=%02X %02X %02X %02X",
                      (unsigned long)total,
@@ -932,24 +1012,77 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                  (unsigned long)va, (unsigned)g_dma_size,
                  g_rr_com != INVALID_HANDLE_VALUE ? "OPEN" : "CLOSED");
 
-            /* At 1E 28: release USB + prepare UART. Data is NOT ready yet —
-               WinOLS writes it to the DMA buffer after 1E 28.
-               Actual write happens at 1E 2C when data is confirmed ready.  */
+            /* At 1E 28: SCAN FIRST (USB still active = no timing pressure),
+               THEN USB Uninit + D2XX reopen + UART init.
+               When 1E 2C arrives (right after we return), UART is ready and
+               scan is done → write starts immediately with 0ms delay.       */
             if (va > 0x10000) {
                 g_bridge_done = TRUE;
-                wlog("S3: USB Uninit + UART-Vorbereitung (Daten kommen bei 1E 2C)...");
-                /* Release USB so MCU enters download mode */
+
+                /* ── Step 1: MEM SCAN while USB is still active ── */
+                if (!g_scan_done) {
+                    wlog("S3: MEM SCAN (USB aktiv, kein UART-Delay)...");
+                    SYSTEM_INFO si2; GetSystemInfo(&si2);
+                    BYTE* saddr = (BYTE*)si2.lpMinimumApplicationAddress;
+                    BYTE* smaxAddr = (BYTE*)si2.lpMaximumApplicationAddress;
+                    int sfound = 0;
+                    g_scan_done = 1;
+                    while (saddr < smaxAddr && sfound < 3 &&
+                           (uintptr_t)saddr < 0x7F000000u) { /* stay in safe user space */
+                        MEMORY_BASIC_INFORMATION smbi;
+                        SIZE_T vq = VirtualQuery(saddr, &smbi, sizeof(smbi));
+                        if (!vq || smbi.RegionSize == 0) { saddr += 0x10000; continue; }
+                        if (smbi.State == MEM_COMMIT &&
+                            (smbi.Protect & (PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY)) &&
+                            !(smbi.Protect & (PAGE_GUARD|PAGE_NOACCESS)) &&
+                            smbi.RegionSize >= 0x10000 &&
+                            (uintptr_t)smbi.BaseAddress < 0x7F000000u) {
+                            BYTE* sp = (BYTE*)smbi.BaseAddress;
+                            /* Stay within safe range: cap at 0x7F000000 */
+                            SIZE_T safe_size = smbi.RegionSize;
+                            if ((uintptr_t)sp + safe_size > 0x7F000000u)
+                                safe_size = 0x7F000000u - (uintptr_t)sp;
+                            BYTE* send = sp + safe_size - 8;
+                            while (sp < send) {
+                                if (sp[0]==0xAE && sp[1]==0x14 && sp[2]==0xCB && sp[3]==0x14) {
+                                    DWORD cbase = (DWORD)(uintptr_t)sp - va;
+                                    if (!g_rom_base) {
+                                        g_rom_base = cbase;
+                                        g_dma_size = (DWORD)smbi.RegionSize;
+                                        wlog("S3: ROM base=0x%08lX size=0x%lX",
+                                             (unsigned long)g_rom_base,(unsigned long)g_dma_size);
+                                    }
+                                    sfound++; if (sfound >= 3) break; sp += 4;
+                                } else { sp++; }
+                            }
+                        }
+                        saddr = (BYTE*)((uintptr_t)smbi.BaseAddress + smbi.RegionSize);
+                        if ((uintptr_t)saddr > 0x7F000000u) break;
+                    }
+                    if (!sfound) wlog("S3: MEM SCAN: kein Treffer");
+                }
+
+                /* ── Step 2: USB Uninit → MCU in download mode ── */
+                wlog("S3: USB Uninit...");
                 if (g_real_driver_handle) {
                     typedef DWORD (__cdecl *FN)(WDU_DRIVER_HANDLE);
                     FN fn_u = (FN)get_real("WDU_Uninit");
                     if (fn_u) { fn_u(g_real_driver_handle); g_real_driver_handle = NULL; }
                 }
                 Sleep(300);
-                /* Reopen D2XX + UART init */
+
+                /* ── Step 3: D2XX reopen by SN ── */
                 if (g_rr_ft && g_FT_Close) { g_FT_Close(g_rr_ft); g_rr_ft = NULL; }
-                if (g_FT_Open) {
+                if (g_FT_OpenEx) {
                     void* fth2 = NULL;
-                    if (g_FT_Open(0, &fth2) == 0 && fth2) {
+                    ULONG rs2 = g_FT_OpenEx((PVOID)"BGB9J82D", FT_OPEN_BY_SERIAL_NUMBER, &fth2);
+                    if (rs2 != 0) { fth2 = NULL; }
+                    if (!fth2) {
+                        rs2 = g_FT_OpenEx((PVOID)"RoadRunner Emulator", FT_OPEN_BY_DESCRIPTION, &fth2);
+                        if (rs2 != 0) fth2 = NULL;
+                    }
+                    wlog("S3: D2XX SN BGB9J82D: rs=%lu fth=%p", (unsigned long)rs2, fth2);
+                    if (fth2) {
                         g_rr_ft = fth2;
                         if (g_FT_SetBitMode) g_FT_SetBitMode(fth2, 0, 0);
                         if (g_FT_SetBaudRate) g_FT_SetBaudRate(fth2, RR_BAUD);
@@ -961,8 +1094,10 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                         if (g_FT_Purge) g_FT_Purge(fth2, 1|2);
                     }
                 }
+
+                /* ── Step 4: UART init — 1E 2C will follow immediately ── */
                 if (rr_init_with_baud(g_rr_com))
-                    wlog("S3: UART bereit — warte auf 1E 2C (ECU-Daten)...");
+                    wlog("S3: UART init OK — 1E 2C schreibt sofort");
                 else
                     wlog("S3: UART init FAILED");
             }
@@ -970,7 +1105,8 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
         if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x2C) {
             DWORD va2 = ((DWORD)cmd[4]) | ((DWORD)cmd[5]<<8) |
                         ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
-            if (g_dma_start_addr > 0 && va2 > g_dma_start_addr)
+            /* Only use 1E 2C size if scan hasn't set the full ROM size yet */
+            if (g_dma_start_addr > 0 && va2 > g_dma_start_addr && g_rom_base == 0)
                 g_dma_size = va2 - g_dma_start_addr;
             wlog("S3: 1E 2C ptr2=0x%08lX size=0x%04X — ECU-Daten jetzt bereit",
                  (unsigned long)va2, (unsigned)g_dma_size);
@@ -979,24 +1115,62 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
             /* Write if ROM base is already known (scan ran before 1E 2C) */
             if (g_bridge_done && g_dma_start_addr > 0 &&
                 g_rom_base != 0 && g_rr_com != INVALID_HANDLE_VALUE) {
-                BYTE* ecuData = (BYTE*)(uintptr_t)(g_rom_base + g_dma_start_addr);
+                BYTE* ecuData = (BYTE*)(uintptr_t)g_rom_base; /* ROM[0] not ROM[dma_offset] */
                 DWORD total = (g_dma_size + 255) / 256;
                 wlog("S3: Schreibe %lu Blocks, plain[0:4]=%02X %02X %02X %02X",
                      (unsigned long)total,
                      ecuData[0],ecuData[1],ecuData[2],ecuData[3]);
                 if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
-                int ok = 1;
-                for (DWORD blk = 0; blk < total && ok; blk++) {
-                    BYTE plain[256] = {0};
-                    DWORD off = blk * 256;
-                    DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
-                    memcpy(plain, ecuData + off, copy);
-                    ok = rr_write_block_com(g_rr_com, (int)blk, plain);
-                    if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+
+                /* Try block 0 first. If NAK → PRNG not at 0 (stored in MCU EEPROM).
+                   Probe to find actual PRNG position, then write from there.        */
+                BYTE plain0[256] = {0};
+                memcpy(plain0, ecuData, 256 < total*256 ? 256 : total*256);
+                if (!rr_write_block_com(g_rr_com, 0, plain0)) {
+                    wlog("S3: Block 0 NAK — suche PRNG-Position...");
+                    if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
+                    int prng_pos = rr_find_prng_pos(g_rr_com);
+                    wlog("S3: PRNG-Position = %d", prng_pos);
+                    if (prng_pos < 0) {
+                        wlog("S3: PRNG nicht gefunden — Write FAILED");
+                        g_bridge_done = FALSE;
+                        break_label: goto write_end;
+                    }
+                    /* Block 0 was written by probe (zeros at PRNG pos), now continue from 1 */
+                    wlog("S3: Schreibe ab Block 1 (EPROM[%d..] = ROM[%d..])...",
+                         (prng_pos+1), (prng_pos+1));
+                    /* NOTE: probe wrote zeros to block at prng_pos, we skip to prng_pos+1 */
+                    /* For now just write blocks 1..total with correct PRNG offset */
+                    int ok2 = 1;
+                    for (DWORD blk = 1; blk < total && ok2; blk++) {
+                        BYTE plain[256] = {0};
+                        DWORD off = blk * 256;
+                        DWORD copy = (total*256 - off < 256) ? (total*256 - off) : 256;
+                        if (off < g_dma_size) {
+                            copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                            memcpy(plain, ecuData + off, copy);
+                        }
+                        ok2 = rr_write_block_com(g_rr_com, (int)(prng_pos + blk), plain);
+                        if (!ok2) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                    }
+                    if (ok2) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)(total-1));
+                    else     wlog("S3: Write FAILED");
+                } else {
+                    /* Block 0 ACK'd normally — write remaining blocks */
+                    int ok = 1;
+                    for (DWORD blk = 1; blk < total && ok; blk++) {
+                        BYTE plain[256] = {0};
+                        DWORD off = blk * 256;
+                        DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                        memcpy(plain, ecuData + off, copy);
+                        ok = rr_write_block_com(g_rr_com, (int)blk, plain);
+                        if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                    }
+                    if (ok) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
+                    else    wlog("S3: Write FAILED");
                 }
-                if (ok) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
-                else    wlog("S3: Write FAILED");
-                g_bridge_done = FALSE;  /* allow next Load */
+                write_end:
+                g_bridge_done = FALSE;
             }
         }
         /* ── End Sprint 3 ─────────────────────────────────────────────── */
@@ -1024,10 +1198,20 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                 ((BYTE*)pBuffer)[1] = 0x04;  /* LE high byte of 0x044A */
             } else if (dwBytes == 8) {
                 /* 0x20 0x30 hardware status: 0x00=defective, 0x01=OK.
-                   Return 0x01 so WinOLS proceeds past the check to send DMA pointer. */
+                   After returning 01, set g_hw_check_done so EP6 switches to
+                   "configured" state (byte[2]=0x00 instead of 0x42).           */
                 ((BYTE*)pBuffer)[0] = 0x01;
                 ((BYTE*)pBuffer)[1] = 0x00;
-                wlog("EP2 IN 8b: returning status=01 (OK) for cmd 20 30");
+                g_hw_check_done = 1;  /* start EP6 state machine */
+                /* Also try setting OLS object "configured" fields if we have the pointer */
+                if (g_ols_obj) {
+                    /* Try common Delphi object offsets for "configured" boolean */
+                    g_ols_obj[0x0C] = 1;  /* field_C */
+                    g_ols_obj[0x10] = 1;  /* field_10 */
+                    wlog("EP2 IN 8b: hw check OK, set obj[0C]=1 obj[10]=1, g_hw_check_done=TRUE");
+                } else {
+                    wlog("EP2 IN 8b: returning status=01 (OK) for cmd 20 30");
+                }
             }
             /* For other sizes: all zeros = ACK/success */
             if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;

@@ -166,17 +166,21 @@ static BOOL rr_open_d2xx(void) {
     return TRUE;
 }
 
-/* I/O wrappers: use D2XX when available, fall back to COM HANDLE */
+/* I/O wrappers: use D2XX when available, fall back to COM HANDLE.
+   Guard against INVALID_HANDLE_VALUE (0xFFFFFFFF) in g_rr_ft which
+   can occur if D2XX open succeeds but stores a bad handle — prevents
+   VEH access violations at 0xFFFFFFFF.                                */
+#define RR_FT_VALID(h) ((h) && (uintptr_t)(h) != 0xFFFFFFFFu)
 static BOOL rr_tx(HANDLE hCom, const void* buf, DWORD n, DWORD* written) {
-    if (g_rr_ft && g_FT_Write) { return g_FT_Write(g_rr_ft,(PVOID)buf,n,written) == FT_OK; }
+    if (RR_FT_VALID(g_rr_ft) && g_FT_Write) { return g_FT_Write(g_rr_ft,(PVOID)buf,n,written) == FT_OK; }
     return WriteFile(hCom, buf, n, written, NULL);
 }
 static BOOL rr_rx(HANDLE hCom, void* buf, DWORD n, DWORD* got) {
-    if (g_rr_ft && g_FT_Read) { return g_FT_Read(g_rr_ft,buf,n,got) == FT_OK; }
+    if (RR_FT_VALID(g_rr_ft) && g_FT_Read) { return g_FT_Read(g_rr_ft,buf,n,got) == FT_OK; }
     return ReadFile(hCom, buf, n, got, NULL);
 }
 static void rr_purge(HANDLE hCom) {
-    if (g_rr_ft && g_FT_Purge) { g_FT_Purge(g_rr_ft, FT_PURGE_RX|FT_PURGE_TX); return; }
+    if (RR_FT_VALID(g_rr_ft) && g_FT_Purge) { g_FT_Purge(g_rr_ft, FT_PURGE_RX|FT_PURGE_TX); return; }
     PurgeComm(hCom, PURGE_RXCLEAR|PURGE_TXCLEAR);
 }
 static void rr_set_baud(HANDLE hCom, DWORD baud) {
@@ -479,18 +483,67 @@ static int rr_init_with_baud(HANDLE hCom) {
     return 0;
 }
 
+/* Compute PRNG shift for arbitrary position (extends beyond 512-entry table). */
+static BYTE rr_shift_at(int pos) {
+    if (pos < 512) return RR_SHIFTS[pos];
+    /* Extend using formula: shift[n] = BASE_KEY[shift[n-1]] */
+    BYTE s = RR_SHIFTS[511];
+    for (int i = 512; i <= pos; i++) s = RR_BASE_KEY[s];
+    return s;
+}
+
+/* Find current PRNG position by probing blocks 0..1023.
+   Returns the position that ACKs, or -1 if none found.
+   Uses all-zeros plaintext to minimize data corruption risk.           */
+static int rr_find_prng_pos(HANDLE hCom) {
+    DWORD written, got;
+    /* Precompute extended shift table for positions > 511 */
+    for (int pos = 0; pos < 1024; pos++) {
+        BYTE shift = rr_shift_at(pos);
+        BYTE header[7], cipher[256], cs = 0;
+        header[0] = RR_CMD_WRITE; header[1] = 0x00;
+        /* Use modulo 512 for TOKENS/EXTRA0 (table has 512 entries) */
+        int tpos = pos % 512;
+        header[2] = RR_TOKENS[tpos][0]; header[3] = RR_TOKENS[tpos][1];
+        header[4] = RR_EXTRA0[tpos];
+        header[5] = RR_BASE_KEY[(254 + shift) & 0xFF];
+        header[6] = RR_BASE_KEY[(255 + shift) & 0xFF];
+        for (int i = 0; i < 256; i++) cipher[i] = RR_BASE_KEY[(i + shift) & 0xFF];
+        for (int i = 0; i < 7;   i++) cs += header[i];
+        for (int i = 0; i < 256; i++) cs += cipher[i];
+        rr_tx(hCom, header,  7,   &written);
+        rr_tx(hCom, cipher, 256,  &written);
+        rr_tx(hCom, &cs,     1,   &written);
+        BYTE ack = 0; got = 0;
+        rr_rx(hCom, &ack, 1, &got);
+        if (got == 1 && ack == RR_ACK_BYTE) {
+            wlog("  PRNG probe: ACK at pos %d shift=%d token=%02X%02X",
+                 pos, shift, header[2], header[3]);
+            return pos;
+        }
+        if (got == 0) {
+            wlog("  PRNG probe: timeout at pos %d", pos);
+            return -1;
+        }
+        if (pos < 5 || pos % 100 == 0)
+            wlog("  PRNG probe: pos %d NAK (0x%02X)", pos, ack);
+    }
+    return -1;
+}
+
 /* Write one 256-byte block to Roadrunner (returns 1 on success) */
 static int rr_write_block_com(HANDLE hCom, int block_nr,
                               const BYTE* plain_256) {
     BYTE cipher[256], header[7], cs = 0;
     DWORD written, got;
-    int shift = RR_SHIFTS[block_nr % 512];
+    int shift = rr_shift_at(block_nr);  /* uses BASE_KEY extension for > 511 */
+    int tpos  = block_nr % 512;         /* TOKENS/EXTRA0 modulo 512 */
     /* Header */
     header[0] = RR_CMD_WRITE;
     header[1] = 0x00;
-    header[2] = RR_TOKENS[block_nr % 512][0];
-    header[3] = RR_TOKENS[block_nr % 512][1];
-    header[4] = RR_EXTRA0[block_nr % 512];
+    header[2] = RR_TOKENS[tpos][0];
+    header[3] = RR_TOKENS[tpos][1];
+    header[4] = RR_EXTRA0[tpos];
     header[5] = RR_BASE_KEY[(254 + shift) & 0xFF];
     header[6] = RR_BASE_KEY[(255 + shift) & 0xFF];
     /* Encrypt */
