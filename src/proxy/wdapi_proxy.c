@@ -397,6 +397,7 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
                 wlog("Patch1: 9s call at 0x0052CECA -> NOP x5");
             }
         }
+        /* Patch4: disabled for Phase 1 fuzzer run */
         /* Patch2: TODO - find correct blocking call address for Hardware Config hang.
            Patch2 attempt (JE→JMP at 0x005FA829/83D/851) was REVERTED:
            skipping those calls causes WinOLS to spin at 100% CPU indefinitely.
@@ -687,9 +688,10 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     return 0;
 }
 
+/* param=1 means reconnect (skip second pfDeviceAttach to avoid re-triggering loop) */
 static DWORD WINAPI attach_thread(LPVOID param) {
-    (void)param;
-    Sleep(500);  /* 500ms: first attach — triggers EP6 identification polling */
+    int is_reconnect = (param == (LPVOID)1);
+    Sleep(100);  /* 100ms: fast enough for reconnect loop, safe for startup */
     if (!g_attach_cb) return 0;
     WDU_DEVICE_HANDLE use_handle = g_attach_handle ? g_attach_handle : FAKE_DEVICE_HANDLE;
 
@@ -716,14 +718,35 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     WDU_DEVICE_HANDLE safe_handle = (g_attach_handle && g_real_driver_handle)
                                      ? FAKE_DEVICE_HANDLE  /* avoid WD16 internal crash */
                                      : use_handle;
-    wlog("[attach] Using safe_handle=%p for callback", safe_handle);
+    /* Use real WinDriver handle when available (from reconnect after Config OK).
+       WinOLS sets [0x01FF9558]=0 only when it receives a real WinDriver handle.  */
+    if (g_real_driver_handle) {
+        safe_handle = (WDU_DEVICE_HANDLE)g_real_driver_handle;
+        wlog("[attach] Using REAL WinDriver handle=%p", safe_handle);
+    } else {
+        wlog("[attach] Using safe_handle=%p (fake)", safe_handle);
+    }
     BOOL ok = g_attach_cb(safe_handle, use_device, g_attach_userdata);
     wlog("[attach] pfDeviceAttach returned %d", ok);
 
-    /* Second pfDeviceAttach at +3s — activates Load/Disconnect button in WinOLS.
-       Use global g_attach2_fired_g so WDU_Uninit can reset it for reconnect
-       (Config→Hardware→OK path causes WDU_Uninit+WDU_Init cycle).            */
-    if (ok && g_attach_cb && InterlockedCompareExchange(&g_attach2_fired_g, 1, 0) == 0) {
+    /* After pfDeviceAttach: WinOLS sets [0x01FF9558]=0x00530026 (reconnect handle).
+       Zero it repeatedly for 200ms so the reconnect loop sees 0 and exits via JZ.
+       The loop runs at ~10k iter/s; 200ms gives it 2000 chances to see the zero. */
+    if (ok) {
+        volatile DWORD* h1 = (volatile DWORD*)0x01FF9558u;
+        volatile DWORD* h2 = (volatile DWORD*)0x01A99558u;
+        for (int n = 0; n < 20; n++) {
+            *h1 = 0; *h2 = 0;
+            Sleep(10);  /* 10ms × 20 = 200ms window */
+        }
+        wlog("[attach] handles zeroed for 200ms (reconnect loop exit)");
+    }
+
+    /* Second pfDeviceAttach at +3s — activates Load/Disconnect button.
+       Skip during reconnect: the second attach re-triggers the reconnect loop.
+       Only fire for startup attach (is_reconnect == 0).                       */
+    if (!is_reconnect && ok && g_attach_cb &&
+        InterlockedCompareExchange(&g_attach2_fired_g, 1, 0) == 0) {
         Sleep(3000);
         if (g_attach_cb) {
             WDU_DEVICE_HANDLE handle2 = (WDU_DEVICE_HANDLE)g_fake_stream_data;
@@ -755,6 +778,9 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
         }
         g_real_driver_handle = NULL;
     }
+    /* Save callback before clearing — needed for reconnect scheduling below */
+    WDU_ATTACH_CALLBACK saved_cb = g_attach_cb;
+    PVOID saved_userdata = g_attach_userdata;
     g_attach_handle = NULL;
     g_attach_cb = NULL;
     /* Reset flags for reconnect */
@@ -764,10 +790,11 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
     /* Log bytes at caller address to find blocking code */
     if (r0 > (void*)0x00400000 && r0 < (void*)0x00900000) {
         BYTE* ret_code = (BYTE*)(uintptr_t)r0;
-        wlog("WDU_Uninit: caller=0x%p bytes_after=[%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X]",
+        wlog("WDU_Uninit: caller=0x%p [%02X%02X %02X%02X%02X%02X%02X %02X%02X %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X]",
              r0,
-             ret_code[0],ret_code[1],ret_code[2],ret_code[3],ret_code[4],
-             ret_code[5],ret_code[6],ret_code[7],ret_code[8],ret_code[9]);
+             ret_code[0],ret_code[1], ret_code[2],ret_code[3],ret_code[4],ret_code[5],ret_code[6],
+             ret_code[7],ret_code[8], ret_code[9],ret_code[10],ret_code[11],ret_code[12],ret_code[13],
+             ret_code[14],ret_code[15],ret_code[16],ret_code[17],ret_code[18],ret_code[19]);
         /* Also look at r1 (caller's caller) */
         if (r1 > (void*)0x00400000 && r1 < (void*)0x00900000) {
             BYTE* ret1 = (BYTE*)(uintptr_t)r1;
@@ -776,23 +803,61 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
         }
     }
 
-    /* Patch3: after WDU_Uninit, zero [0x01FF9558] so JZ at 0x005FA829 is taken.
-       Code at 0x005FA822: CMP [0x01FF9558],0 / JZ → if non-zero: spin loop.
-       This value is the WDU_DRIVER_HANDLE stored by WinOLS.
-       Setting to 0 makes WinOLS believe handle is already released. */
+    /* Patch3: zero BOTH handles that the reconnect loops check.
+       Loop 1 (first WDU_Uninit):  CMP [0x01FF9558],0 → if non-zero: spin
+       Loop 2 (second WDU_Uninit): CMP [0x01A99558],0 → if non-zero: spin
+       Both must be 0 for both loops to exit via JZ.                      */
     {
-        volatile DWORD* handle_ptr = (volatile DWORD*)0x01FF9558u;
-        if ((DWORD)(uintptr_t)handle_ptr > 0x00400000 &&
-            (DWORD)(uintptr_t)handle_ptr < 0x7F000000) {
-            DWORD old_val = *handle_ptr;
-            *handle_ptr = 0;
-            wlog("Patch3: [0x01FF9558] 0x%08lX → 0x00000000 (stops JNZ spin loop)",
-                 (unsigned long)old_val);
-        }
+        volatile DWORD* h1 = (volatile DWORD*)0x01FF9558u;
+        volatile DWORD* h2 = (volatile DWORD*)0x01A99558u;
+        DWORD v1 = *h1, v2 = *h2;
+        *h1 = 0; *h2 = 0;
+        wlog("Patch3: [0x01FF9558]=0x%08lX→0  [0x01A99558]=0x%08lX→0",
+             (unsigned long)v1, (unsigned long)v2);
     }
 
-    /* No reconnect scheduling here — WinOLS will call WDU_Init separately.
-       Our Patch3 above zeroed the handle so the spin loop is avoided.         */
+    /* OLS300 Simulation: after WDU_Uninit, fire pfDeviceAttach immediately.
+       Use SAVED callback (g_attach_cb was cleared above).
+       The reconnect loop exits when [0x01FF9558] becomes 0 after WinOLS
+       processes a successful pfDeviceAttach (OLS300 "reconnected").            */
+    if (saved_cb) {
+        g_attach_cb = saved_cb;      /* restore for attach_thread */
+        g_attach_userdata = saved_userdata;
+        wlog("WDU_Uninit: OLS300 Simulator — reconnect with real WinDriver handle");
+
+        /* Re-open real WinDriver session so pfDeviceAttach gets a real handle.
+           WinOLS sets [0x01FF9558]=0 only when pfDeviceAttach has a real handle. */
+        if (!g_real_driver_handle && g_real) {
+            typedef DWORD (__cdecl *PFN_OPEN)(DWORD, const char*);
+            typedef DWORD (__cdecl *PFN_INIT)(WDU_DRIVER_HANDLE*, WDU_MATCH_TABLE*,
+                                               DWORD, void*, const char*, DWORD);
+            PFN_OPEN real_open = (PFN_OPEN)get_real("WDC_DriverOpen");
+            PFN_INIT real_init = (PFN_INIT)get_real("WDU_Init");
+            if (real_open && real_init) {
+                /* Quick re-open using saved match table from last WDU_Init */
+                DWORD open_r = real_open(0, "12345abcde1234.license");
+                if (open_r == 0) {
+                    WDU_MATCH_TABLE mt = {OLS300_VID, OLS300_PID, 0, 0};
+                    g_real_init_out = NULL;
+                    DWORD r = real_init(&g_real_init_out, &mt, 1, NULL,
+                                        "12345abcde1234.license", 0);
+                    if (r == 0 && g_real_init_out) {
+                        g_real_driver_handle = g_real_init_out;
+                        wlog("WDU_Uninit: real handle restored: %p", g_real_driver_handle);
+                    } else {
+                        wlog("WDU_Uninit: real WDU_Init failed 0x%lX", (unsigned long)r);
+                    }
+                }
+            }
+        }
+
+        /* param=(LPVOID)1 = reconnect (skips second pfDeviceAttach) */
+        HANDLE ht = CreateThread(NULL, 0, attach_thread, (LPVOID)1, CREATE_SUSPENDED, NULL);
+        if (ht) {
+            SetThreadPriority(ht, THREAD_PRIORITY_ABOVE_NORMAL);
+            ResumeThread(ht); CloseHandle(ht);
+        }
+    }
     return 0;
 }
 
@@ -1197,21 +1262,19 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                 ((BYTE*)pBuffer)[0] = 0x4A;  /* LE low byte of 0x044A */
                 ((BYTE*)pBuffer)[1] = 0x04;  /* LE high byte of 0x044A */
             } else if (dwBytes == 8) {
-                /* 0x20 0x30 hardware status: 0x00=defective, 0x01=OK.
-                   After returning 01, set g_hw_check_done so EP6 switches to
-                   "configured" state (byte[2]=0x00 instead of 0x42).           */
-                ((BYTE*)pBuffer)[0] = 0x01;
-                ((BYTE*)pBuffer)[1] = 0x00;
-                g_hw_check_done = 1;  /* start EP6 state machine */
-                /* Also try setting OLS object "configured" fields if we have the pointer */
-                if (g_ols_obj) {
-                    /* Try common Delphi object offsets for "configured" boolean */
-                    g_ols_obj[0x0C] = 1;  /* field_C */
-                    g_ols_obj[0x10] = 1;  /* field_10 */
-                    wlog("EP2 IN 8b: hw check OK, set obj[0C]=1 obj[10]=1, g_hw_check_done=TRUE");
-                } else {
-                    wlog("EP2 IN 8b: returning status=01 (OK) for cmd 20 30");
+                /* Phase 1 Fuzzer: read 20 30 response from %TEMP%\ols300_2030_resp.bin
+                   Fuzzer writes 8 bytes; default 01 00 ... if file absent. */
+                {
+                    BYTE resp[8] = {0x01,0,0,0,0,0,0,0};
+                    char fp[MAX_PATH]; GetTempPathA(MAX_PATH, fp);
+                    strcat_s(fp, MAX_PATH, "ols300_2030_resp.bin");
+                    FILE* fz=NULL; if(fopen_s(&fz,fp,"rb")==0&&fz){fread(resp,1,8,fz);fclose(fz);}
+                    memcpy(pBuffer, resp, 8);
+                    g_hw_check_done = 1;
+                    wlog("EP2 IN 8b (20 30) FUZZER: [%02X %02X %02X %02X %02X %02X %02X %02X]",
+                         resp[0],resp[1],resp[2],resp[3],resp[4],resp[5],resp[6],resp[7]);
                 }
+                if (g_ols_obj) { g_ols_obj[0x0C]=1; g_ols_obj[0x10]=1; }
             }
             /* For other sizes: all zeros = ACK/success */
             if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
