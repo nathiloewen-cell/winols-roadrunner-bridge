@@ -131,9 +131,12 @@ static BOOL rr_autodetect(void) {
 }
 
 /* Sprint 3 bridge state */
-static DWORD g_dma_start_addr = 0;   /* WinOLS ECU data VA (from cmd 1E 28) */
+static DWORD g_dma_start_addr = 0;   /* ROM file offset (from cmd 1E 28) */
 static DWORD g_dma_size = 0x8000;    /* default 32KB; updated from project */
 static volatile BOOL g_bridge_done = FALSE;
+static DWORD g_rom_base = 0;         /* actual Windows VA of ROM start (scan result) */
+static volatile BOOL g_dma_ready = FALSE;  /* set by 1E 2C — data is confirmed ready */
+static volatile int  g_scan_done = 0;      /* memory scan completed flag */
 
 /* ── Logger (reuse pattern from ftd2xx proxy) ────────────────────────── */
 static FILE* g_log = NULL;
@@ -830,6 +833,78 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                  ((BYTE*)pBuffer)[2], ((BYTE*)pBuffer)[3],
                  g_ep2_out_count);
         }
+        /* One-time memory scan: find ECU data in WinOLS process memory.
+           The DMA addr (0x148AC) is a ROM file offset, NOT a Windows VA.
+           We scan all readable pages for the known ECU signature bytes.  */
+        if (g_dma_start_addr > 0x10000 && !g_scan_done) {
+            g_scan_done = 1;
+            wlog("MEM SCAN: suche ECU-Daten im WinOLS-Prozess...");
+            SYSTEM_INFO si; GetSystemInfo(&si);
+            BYTE* addr = (BYTE*)si.lpMinimumApplicationAddress;
+            BYTE* maxAddr = (BYTE*)si.lpMaximumApplicationAddress;
+            int found = 0;
+            while (addr < maxAddr && found < 5) {
+                MEMORY_BASIC_INFORMATION mbi;
+                if (!VirtualQuery(addr, &mbi, sizeof(mbi))) { addr += 0x1000; continue; }
+                /* Only scan committed, readable, non-executable pages */
+                if (mbi.State == MEM_COMMIT &&
+                    (mbi.Protect & (PAGE_READONLY|PAGE_READWRITE|PAGE_WRITECOPY)) &&
+                    !(mbi.Protect & PAGE_GUARD) && mbi.RegionSize >= 0x10000) {
+                    /* Scan this region for ECU signature (first 8 bytes of Audi A3 ROM) */
+                    BYTE* p = (BYTE*)mbi.BaseAddress;
+                    BYTE* end = p + mbi.RegionSize - 8;
+                    /* safe scan — region is verified readable via VirtualQuery */
+                    while (p < end) {
+                        if (p[0]==0xAE && p[1]==0x14 && p[2]==0xCB && p[3]==0x14) {
+                            /* ROM base = hit VA - ROM file offset at this location */
+                            DWORD candidate_base = (DWORD)(uintptr_t)p - g_dma_start_addr;
+                            wlog("MEM SCAN HIT: VA=0x%08lX base=0x%08lX [%02X %02X %02X %02X] region=0x%08lX",
+                                 (unsigned long)(uintptr_t)p,
+                                 (unsigned long)candidate_base,
+                                 p[0],p[1],p[2],p[3],
+                                 (unsigned long)(uintptr_t)mbi.BaseAddress);
+                            if (!g_rom_base) {
+                                g_rom_base = candidate_base;
+                                /* Update dma_size to full region (= full ROM size) */
+                                g_dma_size = (DWORD)mbi.RegionSize;
+                                wlog("MEM SCAN: ROM base=0x%08lX size=0x%08lX (full ROM)",
+                                     (unsigned long)g_rom_base, (unsigned long)g_dma_size);
+                            }
+                            found++;
+                            if (found >= 3) break;
+                            p += 4;
+                        } else { p++; }
+                    }
+                }
+                addr = (BYTE*)mbi.BaseAddress + mbi.RegionSize;
+            }
+            if (!found) wlog("MEM SCAN: Signatur AE 14 CB 14 nicht gefunden");
+            else        wlog("MEM SCAN: %d Treffer gefunden", found);
+
+            /* Trigger write NOW if 1E 2C already arrived (g_dma_ready) */
+            if (g_rom_base && g_dma_ready && g_bridge_done &&
+                g_rr_com != INVALID_HANDLE_VALUE) {
+                BYTE* ecuData = (BYTE*)(uintptr_t)(g_rom_base + g_dma_start_addr);
+                DWORD total = (g_dma_size + 255) / 256;
+                wlog("S3: MEM SCAN → Write %lu Blocks, plain[0:4]=%02X %02X %02X %02X",
+                     (unsigned long)total,
+                     ecuData[0],ecuData[1],ecuData[2],ecuData[3]);
+                if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
+                int ok2 = 1;
+                for (DWORD blk = 0; blk < total && ok2; blk++) {
+                    BYTE plain[256] = {0};
+                    DWORD off = blk * 256;
+                    DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                    memcpy(plain, ecuData + off, copy);
+                    ok2 = rr_write_block_com(g_rr_com, (int)blk, plain);
+                    if (!ok2) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                }
+                if (ok2) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
+                else     wlog("S3: Write FAILED");
+                g_bridge_done = FALSE;
+                g_dma_ready = FALSE;
+            }
+        }
         return 0;
     }
 
@@ -850,41 +925,31 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                        ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
             g_dma_start_addr = va;
             g_bridge_done = FALSE;
+            g_dma_ready = FALSE;
+            g_rom_base = 0;     /* reset — will be rediscovered by scan */
+            g_scan_done = 0;    /* allow new scan for this Load */
             wlog("S3: DMA addr=0x%08lX size=0x%04X rr_com=%s",
                  (unsigned long)va, (unsigned)g_dma_size,
                  g_rr_com != INVALID_HANDLE_VALUE ? "OPEN" : "CLOSED");
 
-            if (va > 0x10000 && !g_bridge_done) {
+            /* At 1E 28: release USB + prepare UART. Data is NOT ready yet —
+               WinOLS writes it to the DMA buffer after 1E 28.
+               Actual write happens at 1E 2C when data is confirmed ready.  */
+            if (va > 0x10000) {
                 g_bridge_done = TRUE;
-                BYTE* ecuData = (BYTE*)(uintptr_t)va;
-                DWORD total = (g_dma_size + 255) / 256;
-
-                /* STRATEGY: MCU ignores UART when USB is active (FT245R PWREN# low).
-                   Solution: call real WDU_Uninit → USB released → PWREN# high →
-                   MCU enters UART download mode → write blocks → done.
-                   WinOLS doesn't notice because we fake ALL EP6/EP2 responses.   */
-                wlog("S3: Releasing USB (WDU_Uninit) to put MCU in download mode...");
+                wlog("S3: USB Uninit + UART-Vorbereitung (Daten kommen bei 1E 2C)...");
+                /* Release USB so MCU enters download mode */
                 if (g_real_driver_handle) {
                     typedef DWORD (__cdecl *FN)(WDU_DRIVER_HANDLE);
-                    FN fn_uninit = (FN)get_real("WDU_Uninit");
-                    if (fn_uninit) {
-                        DWORD r = fn_uninit(g_real_driver_handle);
-                        wlog("S3: real WDU_Uninit -> 0x%lX", (unsigned long)r);
-                        g_real_driver_handle = NULL;
-                    }
+                    FN fn_u = (FN)get_real("WDU_Uninit");
+                    if (fn_u) { fn_u(g_real_driver_handle); g_real_driver_handle = NULL; }
                 }
-                Sleep(300);  /* wait for MCU to detect USB disconnect and return to download mode */
-
-                /* Reopen D2XX handle — it may be invalidated after WDU_Uninit
-                   changed USB device state. FT_Open by index 0 is fast now.    */
-                if (g_rr_ft && g_FT_Close) {
-                    g_FT_Close(g_rr_ft); g_rr_ft = NULL;
-                    wlog("S3: D2XX handle closed, reopening...");
-                }
+                Sleep(300);
+                /* Reopen D2XX + UART init */
+                if (g_rr_ft && g_FT_Close) { g_FT_Close(g_rr_ft); g_rr_ft = NULL; }
                 if (g_FT_Open) {
                     void* fth2 = NULL;
-                    ULONG rs = g_FT_Open(0, &fth2);
-                    if (rs == 0 && fth2) {
+                    if (g_FT_Open(0, &fth2) == 0 && fth2) {
                         g_rr_ft = fth2;
                         if (g_FT_SetBitMode) g_FT_SetBitMode(fth2, 0, 0);
                         if (g_FT_SetBaudRate) g_FT_SetBaudRate(fth2, RR_BAUD);
@@ -894,44 +959,45 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                         if (g_FT_SetTimeouts) g_FT_SetTimeouts(fth2, 1500, 1500);
                         if (g_FT_ClrDtr) g_FT_ClrDtr(fth2);
                         if (g_FT_Purge) g_FT_Purge(fth2, 1|2);
-                        wlog("S3: D2XX reopened (index 0) fth=%p", fth2);
-                    } else {
-                        wlog("S3: D2XX reopen FAILED rs=%lu", (unsigned long)rs);
                     }
                 }
-                Sleep(100);
-
-                /* Now write via UART (MCU in download mode, no USB) */
-                wlog("S3: Re-init via UART nach USB-Freigabe...");
-                if (g_rr_com != INVALID_HANDLE_VALUE && rr_init_with_baud(g_rr_com)) {
-                    wlog("S3: UART init OK — schreibe %lu Blocks...", (unsigned long)total);
-                    Sleep(100);
-                    if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
-                    int ok = 1;
-                    for (DWORD blk = 0; blk < total && ok; blk++) {
-                        BYTE plain[256] = {0};
-                        DWORD off = blk * 256;
-                        DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
-                        memcpy(plain, ecuData + off, copy);
-                        ok = rr_write_block_com(g_rr_com, (int)blk, plain);
-                        if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
-                    }
-                    if (ok) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
-                    else    wlog("S3: Write FAILED");
-                } else {
-                    wlog("S3: UART init FAILED nach USB-Freigabe");
-                }
-            } else if (g_rr_com == INVALID_HANDLE_VALUE) {
-                wlog("S3: UART nicht bereit — Init in WDU_Init fehlgeschlagen");
+                if (rr_init_with_baud(g_rr_com))
+                    wlog("S3: UART bereit — warte auf 1E 2C (ECU-Daten)...");
+                else
+                    wlog("S3: UART init FAILED");
             }
         }
         if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x2C) {
             DWORD va2 = ((DWORD)cmd[4]) | ((DWORD)cmd[5]<<8) |
                         ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
-            /* Update size: distance between DMA ptr1 and ptr2 = one segment size */
             if (g_dma_start_addr > 0 && va2 > g_dma_start_addr)
                 g_dma_size = va2 - g_dma_start_addr;
-            wlog("S3: DMA ptr2=0x%08lX size=0x%04X", (unsigned long)va2, (unsigned)g_dma_size);
+            wlog("S3: 1E 2C ptr2=0x%08lX size=0x%04X — ECU-Daten jetzt bereit",
+                 (unsigned long)va2, (unsigned)g_dma_size);
+            g_dma_ready = TRUE;  /* signal that 1E 2C has arrived */
+
+            /* Write if ROM base is already known (scan ran before 1E 2C) */
+            if (g_bridge_done && g_dma_start_addr > 0 &&
+                g_rom_base != 0 && g_rr_com != INVALID_HANDLE_VALUE) {
+                BYTE* ecuData = (BYTE*)(uintptr_t)(g_rom_base + g_dma_start_addr);
+                DWORD total = (g_dma_size + 255) / 256;
+                wlog("S3: Schreibe %lu Blocks, plain[0:4]=%02X %02X %02X %02X",
+                     (unsigned long)total,
+                     ecuData[0],ecuData[1],ecuData[2],ecuData[3]);
+                if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
+                int ok = 1;
+                for (DWORD blk = 0; blk < total && ok; blk++) {
+                    BYTE plain[256] = {0};
+                    DWORD off = blk * 256;
+                    DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                    memcpy(plain, ecuData + off, copy);
+                    ok = rr_write_block_com(g_rr_com, (int)blk, plain);
+                    if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                }
+                if (ok) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
+                else    wlog("S3: Write FAILED");
+                g_bridge_done = FALSE;  /* allow next Load */
+            }
         }
         /* ── End Sprint 3 ─────────────────────────────────────────────── */
 
