@@ -7,11 +7,193 @@
 #pragma once
 #include <windows.h>
 
-/* Baud rate for Roadrunner communication */
-#define RR_BAUD      115200
+/* Baud rate for Roadrunner communication — 921600 baud (FTDI divisor 0x8003).
+   Captured from EmUtility USBPcap: SetBaudRate wValue=0x8003 → 921600 bps.   */
+#define RR_BAUD      921600
 #define RR_ACK_BYTE  0x4F  /* 'O' = OK */
 #define RR_CMD_WRITE 0x57  /* 'W' */
 #define RR_CMD_READ  0x52  /* 'R' */
+
+/* ── D2XX direct API (bypasses VCP/COM port — works when FTDI is in D2XX mode) ──
+   The TTL adapter (FT232R, VID=0x0403/PID=0x6001) may have VCP disabled in its
+   EEPROM. FT_Prog can still see it (D2XX mode). We load ftd2xx.dll at runtime
+   and communicate directly via FT_Read/FT_Write, bypassing CreateFile/COM port.  */
+
+#define FT_OK                    0
+#define FT_OPEN_BY_SERIAL_NUMBER 1
+#define FT_OPEN_BY_DESCRIPTION   2
+#define FT_PURGE_RX              1
+#define FT_PURGE_TX              2
+#define FT_FLOW_NONE             0
+#define FT_BITS_8                8
+#define FT_STOP_BITS_1           0
+#define FT_PARITY_NONE           0
+
+typedef ULONG (__stdcall *PFN_FT_OpenEx)(PVOID,DWORD,void**);
+typedef ULONG (__stdcall *PFN_FT_Close)(void*);
+typedef ULONG (__stdcall *PFN_FT_SetBaudRate)(void*,ULONG);
+typedef ULONG (__stdcall *PFN_FT_SetDataCharacteristics)(void*,UCHAR,UCHAR,UCHAR);
+typedef ULONG (__stdcall *PFN_FT_SetFlowControl)(void*,USHORT,UCHAR,UCHAR);
+typedef ULONG (__stdcall *PFN_FT_SetTimeouts)(void*,ULONG,ULONG);
+typedef ULONG (__stdcall *PFN_FT_SetLatencyTimer)(void*,UCHAR);
+typedef ULONG (__stdcall *PFN_FT_SetDtr)(void*);
+typedef ULONG (__stdcall *PFN_FT_ClrDtr)(void*);
+typedef ULONG (__stdcall *PFN_FT_SetRts)(void*);
+typedef ULONG (__stdcall *PFN_FT_ClrRts)(void*);
+typedef ULONG (__stdcall *PFN_FT_SetBitMode)(void*,UCHAR,UCHAR);
+typedef ULONG (__stdcall *PFN_FT_Purge)(void*,ULONG);
+typedef ULONG (__stdcall *PFN_FT_Write)(void*,PVOID,DWORD,DWORD*);
+typedef ULONG (__stdcall *PFN_FT_Read)(void*,PVOID,DWORD,DWORD*);
+typedef ULONG (__stdcall *PFN_FT_Open)(DWORD,void**);
+typedef ULONG (__stdcall *PFN_FT_ListDevices)(PVOID,PVOID,DWORD);
+typedef ULONG (__stdcall *PFN_FT_CreateDeviceInfoList)(DWORD*);
+typedef ULONG (__stdcall *PFN_FT_GetDeviceInfoDetail)(DWORD,DWORD*,DWORD*,DWORD*,DWORD*,PCHAR,PCHAR,void**);
+
+static HMODULE             g_ftd2xx_dll       = NULL;
+static void*               g_rr_ft            = NULL;  /* FT_HANDLE when D2XX open */
+static PFN_FT_OpenEx       g_FT_OpenEx                = NULL;
+static PFN_FT_Close        g_FT_Close                 = NULL;
+static PFN_FT_SetBaudRate  g_FT_SetBaudRate           = NULL;
+static PFN_FT_SetDataCharacteristics g_FT_SetDataCharacteristics = NULL;
+static PFN_FT_SetFlowControl g_FT_SetFlowControl      = NULL;
+static PFN_FT_SetTimeouts  g_FT_SetTimeouts           = NULL;
+static PFN_FT_SetLatencyTimer g_FT_SetLatencyTimer    = NULL;
+static PFN_FT_SetDtr       g_FT_SetDtr                = NULL;
+static PFN_FT_ClrDtr       g_FT_ClrDtr                = NULL;
+static PFN_FT_SetRts       g_FT_SetRts                = NULL;
+static PFN_FT_ClrRts       g_FT_ClrRts                = NULL;
+static PFN_FT_SetBitMode   g_FT_SetBitMode            = NULL;
+static PFN_FT_Purge        g_FT_Purge                 = NULL;
+static PFN_FT_Write        g_FT_Write                 = NULL;
+static PFN_FT_Read         g_FT_Read                  = NULL;
+static PFN_FT_Open         g_FT_Open                  = NULL;
+static PFN_FT_ListDevices  g_FT_ListDevices           = NULL;
+static PFN_FT_CreateDeviceInfoList g_FT_CreateDeviceInfoList = NULL;
+static PFN_FT_GetDeviceInfoDetail g_FT_GetDeviceInfoDetail = NULL;
+
+extern void wlog(const char* fmt, ...);
+
+static BOOL rr_load_ftd2xx(void) {
+    if (g_ftd2xx_dll) return (g_FT_Read != NULL);
+    /* Try to load ftd2xx.dll from the same directory as the host EXE */
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    char* slash = strrchr(path, '\\');
+    if (slash) { *(slash+1) = '\0'; strcat_s(path, MAX_PATH, "ftd2xx.dll"); }
+    g_ftd2xx_dll = LoadLibraryA(path);
+    if (!g_ftd2xx_dll) g_ftd2xx_dll = LoadLibraryA("ftd2xx.dll");
+    if (!g_ftd2xx_dll) { wlog("D2XX: ftd2xx.dll not found"); return FALSE; }
+    wlog("D2XX: ftd2xx.dll loaded from %s", path);
+    #define GETPROC(n) g_##n = (PFN_##n)GetProcAddress(g_ftd2xx_dll, #n)
+    GETPROC(FT_OpenEx); GETPROC(FT_Close); GETPROC(FT_SetBaudRate);
+    GETPROC(FT_SetDataCharacteristics); GETPROC(FT_SetFlowControl);
+    GETPROC(FT_SetTimeouts); GETPROC(FT_SetLatencyTimer);
+    GETPROC(FT_SetDtr); GETPROC(FT_ClrDtr);
+    GETPROC(FT_SetRts); GETPROC(FT_ClrRts);
+    GETPROC(FT_SetBitMode); GETPROC(FT_Purge);
+    GETPROC(FT_Write); GETPROC(FT_Read);
+    GETPROC(FT_Open); GETPROC(FT_ListDevices);
+    GETPROC(FT_CreateDeviceInfoList); GETPROC(FT_GetDeviceInfoDetail);
+    #undef GETPROC
+    return (g_FT_OpenEx && g_FT_Read && g_FT_Write);
+}
+
+/* Open TTL adapter via D2XX.
+   Strategy: FT_CreateDeviceInfoList → enumerate → try by SN, then by index.
+   Skip the Roadrunner (will be opened/claimed by WinDriver, shown as OPENED). */
+static BOOL rr_open_d2xx(void) {
+    if (!rr_load_ftd2xx()) return FALSE;
+    void* fth = NULL;
+
+    /* Update D2XX device list */
+    DWORD ndev = 0;
+    if (g_FT_CreateDeviceInfoList) {
+        g_FT_CreateDeviceInfoList(&ndev);
+        wlog("D2XX: CreateDeviceInfoList: %lu device(s)", (unsigned long)ndev);
+    }
+
+    /* Try known serial number "BGB9J82DA" */
+    if (g_FT_OpenEx) {
+        ULONG st = g_FT_OpenEx((PVOID)"BGB9J82DA", FT_OPEN_BY_SERIAL_NUMBER, &fth);
+        if (st != FT_OK) fth = NULL;  /* MUST null on failure — D2XX may return garbage handle */
+        wlog("D2XX: FT_OpenEx(BGB9J82DA) -> status=%lu fth=%p", (unsigned long)st, fth);
+    }
+
+    /* If that failed, try each device by index and pick first non-Roadrunner */
+    if (!fth && g_FT_GetDeviceInfoDetail && ndev > 0) {
+        for (DWORD i = 0; i < ndev && !fth; i++) {
+            DWORD flags=0, type=0, iid=0, loc=0;
+            char sn[64]={0}, desc[64]={0}; void* h2=NULL;
+            g_FT_GetDeviceInfoDetail(i,&flags,&type,&iid,&loc,sn,desc,&h2);
+            wlog("D2XX:   [%lu] SN='%s' desc='%s' flags=0x%lX", (unsigned long)i, sn, desc, (unsigned long)flags);
+            if (flags & 1) { wlog("D2XX:   [%lu] skipped (already open)", (unsigned long)i); continue; }
+            if (strstr(desc,"OLS") || strstr(desc,"EVC") || strstr(desc,"Roadrunner")) continue;
+            ULONG st2 = g_FT_OpenEx((PVOID)sn, FT_OPEN_BY_SERIAL_NUMBER, &fth);
+            if (st2 != FT_OK) fth = NULL;
+            wlog("D2XX:   [%lu] FT_OpenEx(SN) -> %lu fth=%p", (unsigned long)i, (unsigned long)st2, fth);
+        }
+    }
+
+    /* Last resort: FT_Open by index 0..3 */
+    if (!fth && g_FT_Open) {
+        for (DWORD i = 0; i < 4 && !fth; i++) {
+            ULONG st3 = g_FT_Open(i, &fth);
+            if (st3 != FT_OK) fth = NULL;
+            wlog("D2XX: FT_Open(%lu) -> %lu fth=%p", (unsigned long)i, (unsigned long)st3, fth);
+        }
+    }
+
+    if (!fth) { wlog("D2XX: could not open TTL adapter — all methods failed"); return FALSE; }
+    g_rr_ft = fth;
+    /* Reset to UART mode — FT_Prog or other apps may have left the chip in
+       bitbang/MPSSE mode which disables the TX/RX UART pins entirely.
+       FT_SetBitMode(handle, mask=0, mode=0) = RESET to async serial UART. */
+    if (g_FT_SetBitMode) {
+        ULONG sb = g_FT_SetBitMode(fth, 0, 0);
+        wlog("D2XX: FT_SetBitMode(0,0) -> %lu (reset to UART)", (unsigned long)sb);
+        Sleep(50);
+    }
+    /* Configure: 921600 baud (confirmed from EmUtility capture), DTR/RTS disabled */
+    g_FT_SetBaudRate(fth, RR_BAUD);
+    g_FT_SetDataCharacteristics(fth, FT_BITS_8, FT_STOP_BITS_1, FT_PARITY_NONE);
+    g_FT_SetFlowControl(fth, FT_FLOW_NONE, 0, 0);
+    g_FT_SetLatencyTimer(fth, 2);
+    g_FT_SetTimeouts(fth, 1500, 1500);
+    g_FT_ClrDtr(fth);
+    g_FT_ClrRts(fth);
+    g_FT_Purge(fth, FT_PURGE_RX | FT_PURGE_TX);
+    wlog("D2XX: TTL adapter configured 9600 8N1 DTR=0");
+    return TRUE;
+}
+
+/* I/O wrappers: use D2XX when available, fall back to COM HANDLE */
+static BOOL rr_tx(HANDLE hCom, const void* buf, DWORD n, DWORD* written) {
+    if (g_rr_ft && g_FT_Write) { return g_FT_Write(g_rr_ft,(PVOID)buf,n,written) == FT_OK; }
+    return WriteFile(hCom, buf, n, written, NULL);
+}
+static BOOL rr_rx(HANDLE hCom, void* buf, DWORD n, DWORD* got) {
+    if (g_rr_ft && g_FT_Read) { return g_FT_Read(g_rr_ft,buf,n,got) == FT_OK; }
+    return ReadFile(hCom, buf, n, got, NULL);
+}
+static void rr_purge(HANDLE hCom) {
+    if (g_rr_ft && g_FT_Purge) { g_FT_Purge(g_rr_ft, FT_PURGE_RX|FT_PURGE_TX); return; }
+    PurgeComm(hCom, PURGE_RXCLEAR|PURGE_TXCLEAR);
+}
+static void rr_set_baud(HANDLE hCom, DWORD baud) {
+    if (g_rr_ft && g_FT_SetBaudRate) {
+        g_FT_SetBaudRate(g_rr_ft, baud);
+        wlog("D2XX: baud -> %lu", (unsigned long)baud);
+        return;
+    }
+    DCB dcb={0}; dcb.DCBlength=sizeof(dcb);
+    GetCommState(hCom,&dcb); dcb.BaudRate=baud;
+    dcb.ByteSize=8; dcb.Parity=NOPARITY; dcb.StopBits=ONESTOPBIT;
+    dcb.fBinary=TRUE; dcb.fDtrControl=DTR_CONTROL_DISABLE; dcb.fRtsControl=RTS_CONTROL_DISABLE;
+    dcb.fOutxCtsFlow=FALSE; dcb.fOutxDsrFlow=FALSE; dcb.fDsrSensitivity=FALSE;
+    SetCommState(hCom,&dcb);
+    EscapeCommFunction(hCom,CLRDTR); EscapeCommFunction(hCom,CLRRTS);
+}
+/* ── End D2XX infrastructure ─────────────────────────────────────────────── */
 
 /* 256-byte XOR base key (permutation of 0..255) */
 static const BYTE RR_BASE_KEY[256] = {
@@ -244,6 +426,59 @@ static void rr_encrypt_block(int block_nr, const BYTE* plain, BYTE* cipher) {
         cipher[i] = plain[i] ^ RR_BASE_KEY[(i + shift) & 0xFF];
 }
 
+/* Log helper for received bytes */
+static void rr_log_rx(const BYTE* buf, DWORD got, const char* label) {
+    if (got > 0) {
+        char hx[80]={0}; int p=0;
+        for (DWORD i=0; i<got && p<76; i++) p+=_snprintf(hx+p,sizeof(hx)-p,"%02X ",buf[i]);
+        wlog("  rr_init %s: %lu bytes: %s", label, (unsigned long)got, hx);
+    } else {
+        wlog("  rr_init %s: 0 bytes (timeout)", label);
+    }
+}
+
+/* Initialize Roadrunner: DTR-pulse reset, then 'VV' version check + chip config.
+   The Roadrunner MCU enters command mode after a DTR pulse.
+   Uses rr_tx/rr_rx wrappers (D2XX or COM). */
+static int rr_init_com(HANDLE hCom) {
+    BYTE buf[32]; DWORD written, got;
+
+    /* No DTR pulse — capture shows EmUtility sends 56 56 directly without reset.
+       Just flush the RX buffer and send the version request.                    */
+    if (g_rr_ft && g_FT_SetTimeouts) g_FT_SetTimeouts(g_rr_ft, 500, 500);
+    rr_purge(hCom);
+    Sleep(50);
+
+    /* Version request: 'VV' → expect response ending in 'R' (0x52) */
+    BYTE vv[2] = {0x56, 0x56};
+    rr_tx(hCom, vv, 2, &written);
+    wlog("  rr_init: sent 56 56 (written=%lu)", (unsigned long)written);
+    Sleep(500);
+    got = 0; rr_rx(hCom, buf, sizeof(buf), &got);
+    rr_log_rx(buf, got, "after VV");
+    if (got < 1 || buf[got-1] != 0x52) return 0;
+
+    BYTE init6[6] = {0x48, 0x52, 0x07, 0x00, 0x01, 0xA2};
+    rr_tx(hCom, init6, 6, &written);
+    Sleep(100); rr_rx(hCom, buf, 8, &got); rr_log_rx(buf, got, "after init6");
+    BYTE cfg[3] = {0x4E, 0x53, 0xA1};
+    rr_tx(hCom, cfg, 3, &written); Sleep(100); rr_rx(hCom, buf, 10, &got);
+    rr_tx(hCom, cfg, 3, &written); Sleep(100); rr_rx(hCom, buf, 10, &got);
+    return 1;
+}
+
+/* Initialize at 921600 baud (confirmed from EmUtility USBPcap capture). */
+static int rr_init_with_baud(HANDLE hCom) {
+    rr_set_baud(hCom, RR_BAUD);  /* 921600 baud */
+    rr_purge(hCom);
+    Sleep(100);
+    if (rr_init_com(hCom)) {
+        if (g_rr_ft && g_FT_SetTimeouts) g_FT_SetTimeouts(g_rr_ft, 5000, 5000);
+        return 1;
+    }
+    return 0;
+}
+
 /* Write one 256-byte block to Roadrunner (returns 1 on success) */
 static int rr_write_block_com(HANDLE hCom, int block_nr,
                               const BYTE* plain_256) {
@@ -264,12 +499,63 @@ static int rr_write_block_com(HANDLE hCom, int block_nr,
     /* Checksum = SUM(header + cipher) % 256 */
     for (int i = 0; i < 7; i++) cs += header[i];
     for (int i = 0; i < 256; i++) cs += cipher[i];
-    /* Send */
-    WriteFile(hCom, header, 7, &written, NULL);
-    WriteFile(hCom, cipher, 256, &written, NULL);
-    WriteFile(hCom, &cs, 1, &written, NULL);
-    /* ACK */
+    /* Debug: log block 0 header so we can compare with capture */
+    if (block_nr == 0) {
+        wlog("  blk0 hdr: %02X %02X %02X %02X %02X %02X %02X  cs=0x%02X",
+             header[0],header[1],header[2],header[3],header[4],header[5],header[6], cs);
+        wlog("  blk0 cipher[0:4]: %02X %02X %02X %02X  plain[0:4]: %02X %02X %02X %02X",
+             cipher[0],cipher[1],cipher[2],cipher[3],
+             plain_256[0],plain_256[1],plain_256[2],plain_256[3]);
+    }
+    rr_tx(hCom, header, 7, &written);
+    rr_tx(hCom, cipher, 256, &written);
+    rr_tx(hCom, &cs, 1, &written);
     BYTE ack = 0;
-    ReadFile(hCom, &ack, 1, &got, NULL);
-    return (got == 1 && ack == RR_ACK_BYTE) ? 1 : 0;
+    rr_rx(hCom, &ack, 1, &got);
+    if (got != 1 || ack != RR_ACK_BYTE) {
+        wlog("  block %d NAK: got=%lu ack=0x%02X", block_nr, (unsigned long)got, ack);
+        return 0;
+    }
+    return 1;
+}
+
+/* Write one block via FT245R USB (WinDriver real handle).
+   MCU reads from FT245R parallel FIFO when USB host is active.
+   pipe 0x02 = FT245R bulk OUT (PC→MCU), pipe 0x81 = FT245R bulk IN (MCU→PC). */
+typedef DWORD (__cdecl *PFN_WDU_XFER)(void*,DWORD,void*,DWORD*,DWORD,DWORD); /* WDU_TransferBulk */
+static int rr_write_block_usb(PFN_WDU_XFER xfer, void* drv, int block_nr,
+                               const BYTE* plain_256) {
+    BYTE cipher[256], header[7], cs = 0, pkt[264];
+    int shift = RR_SHIFTS[block_nr % 512];
+    header[0] = RR_CMD_WRITE; header[1] = 0x00;
+    header[2] = RR_TOKENS[block_nr % 512][0];
+    header[3] = RR_TOKENS[block_nr % 512][1];
+    header[4] = RR_EXTRA0[block_nr % 512];
+    header[5] = RR_BASE_KEY[(254 + shift) & 0xFF];
+    header[6] = RR_BASE_KEY[(255 + shift) & 0xFF];
+    for (int i = 0; i < 256; i++)
+        cipher[i] = plain_256[i] ^ RR_BASE_KEY[(i + shift) & 0xFF];
+    for (int i = 0; i < 7;   i++) cs += header[i];
+    for (int i = 0; i < 256; i++) cs += cipher[i];
+    memcpy(pkt,     header,  7);
+    memcpy(pkt + 7, cipher, 256);
+    pkt[263] = cs;
+    if (block_nr == 0)
+        wlog("  usb blk0 hdr: %02X %02X %02X %02X %02X %02X %02X cs=%02X",
+             header[0],header[1],header[2],header[3],header[4],header[5],header[6],cs);
+    /* Send 264-byte block to FT245R EP2 OUT */
+    DWORD sent = 0;
+    DWORD r = xfer(drv, 0x02, pkt, &sent, 0, 2000);
+    if (r != 0 || sent != 264) {
+        wlog("  usb blk%d TX fail: r=0x%lX sent=%lu", block_nr, (unsigned long)r, (unsigned long)sent);
+        return 0;
+    }
+    /* Read ACK from FT245R EP1 IN */
+    BYTE ack = 0; DWORD got = 0;
+    r = xfer(drv, 0x81, &ack, &got, 0, 2000);
+    if (got != 1 || ack != RR_ACK_BYTE) {
+        wlog("  usb blk%d NAK: r=0x%lX got=%lu ack=0x%02X", block_nr, (unsigned long)r, (unsigned long)got, ack);
+        return 0;
+    }
+    return 1;
 }

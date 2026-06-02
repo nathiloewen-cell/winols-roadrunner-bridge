@@ -1,0 +1,180 @@
+[06:07:22.600] Sprint 3 Roadrunnerprotokoll - Raw Capture
+[06:07:22.600] Port: COM13
+[06:07:22.600] Roadrunner v12.15.R erwartet (aus Phase B)
+[06:07:22.600] 
+[06:07:22.600] 
+=======================================================
+[06:07:22.600] BAUD 9600
+[06:07:22.600] =======================================================
+[06:07:22.759] 
+[A] CMD_GET_VERSION 0x56
+[06:07:22.760]   TX GET_VERSION [1B]: 56  |V|
+[06:07:24.167]   RX GET_VERSION: TIMEOUT (keine Antwort)
+[06:07:24.167] 
+[B] CMD_GET_EMU_MODE 0x6D
+[06:07:24.179]   TX GET_EMU_MODE [1B]: 6D  |m|
+[06:07:25.388]   RX GET_EMU_MODE: TIMEOUT (keine Antwort)
+[06:07:25.388] 
+[C] CMD_BULK_READ 0x52 addr=0x0000 size=0x0100
+[06:07:25.389]   TX BULK_READ hdr [5B]: 52 00 00 01 00  |R....|
+[06:07:26.999]   RX BULK_READ hdr: TIMEOUT (keine Antwort)
+[06:07:26.000] 
+[D] CMD_SET_BAUD 0x53 -> 115200
+[06:07:26.000]   TX SET_BAUD [5B]: 53 00 01 C2 00  |S....|
+[06:07:28.310]   RX SET_BAUD: TIMEOUT (keine Antwort)
+[06:07:28.310] 
+[E] ACK-Probe 0x06
+[06:07:28.311]   TX ACK-probe [1B]: 06  |.|
+[06:07:29.420]   RX ACK-probe: TIMEOUT (keine Antwort)
+[06:07:29.420] 
+[F] CMD_BULK_WRITE 0x57 header addr=0x0000 size=0x0100
+[06:07:29.420]   TX BULK_WRITE hdr [5B]: 57 00 00 01 00  |W....|
+[06:07:30.734]   RX BULK_WRITE hdr: TIMEOUT (keine Antwort)
+[06:07:30.734] 
+[G] probe 0x52 ('R')
+[06:07:30.734]   TX probe-52 [5B]: 52 00 00 01 00  |R....|
+[06:07:31.938]   RX probe-52: TIMEOUT (keine Antwort)
+[06:07:31.938] 
+[G] probe 0x43 ('C')
+[06:07:31.939]   TX probe-43 [5B]: 43 00 00 01 00  |C....|
+[06:07:33.153]   RX probe-43: TIMEOUT (keine Antwort)
+[06:07:33.153] 
+[G] probe 0x41 ('A')
+[06:07:33.154]   TX probe-41 [5B]: 41 00 00 01 00  |A....|
+[06:07:34.355]   RX probe-41: TIMEOUT (keine Antwort)
+[06:07:34.355] 
+[G] probe 0x72 ('r')
+[06:07:34.355]   TX probe-72 [5B]: 72 00 00 01 00  |r....|
+[06:07:35.561]   RX probe-72: TIMEOUT (keine Antwort)
+[06:07:35.971] 
+=======================================================
+[06:07:35.971] BAUD 115200
+[06:07:35.971] =======================================================
+[06:07:36.131] 
+[A] CMD_GET_VERSION 0x56
+[06:07:36.131]   TX GET_VERSION [1B]: 56  |V|
+[06:07:37.539]   RX GET_VERSION: TIMEOUT (keine Antwort)
+[06:07:37.539] 
+[B] CMD_GET_EMU_MODE 0x6D
+[06:07:37.539]   TX GET_EMU_MODE [1B]: 6D  |m|
+[06:07:38.741]   RX GET_EMU_MODE: TIMEOUT (keine Antwort)
+[06:07:38.741] 
+[C] CMD_BULK_READ 0x52 addr=0x0000 size=0x0100
+[06:07:38.741]   TX BULK_READ hdr [5B]: 52 00 00 01 00  |R....|
+[06:07:40.347]   RX BULK_READ hdr: TIMEOUT (keine Antwort)
+[06:07:40.347] 
+[D] CMD_SET_BAUD 0x53 -> 115200
+[06:07:40.347]   TX SET_BAUD [5B]: 53 00 01 C2 00  |S....|
+[06:07:41.663]   RX SET_BAUD: TIMEOUT (keine Antwort)
+[06:07:41.663] 
+[E] ACK-Probe 0x06
+[06:07:41.663]   TX ACK-probe [1B]: 06  |.|
+[06:07:42.770]   RX ACK-probe: TIMEOUT (keine Antwort)
+[06:07:42.770] 
+[F] CMD_BULK_WRITE 0x57 header addr=0x0000 size=0x0100
+[06:07:42.770]   TX BULK_WRITE hdr [5B]: 57 00 00 01 00  |W....|
+[06:07:44.082]   RX BULK_WRITE hdr: TIMEOUT (keine Antwort)
+[06:07:44.082] 
+[G] probe 0x52 ('R')
+[06:07:44.083]   TX probe-52 [5B]: 52 00 00 01 00  |R....|
+[06:07:45.298]   RX probe-52: TIMEOUT (keine Antwort)
+[06:07:45.298] 
+[G] probe 0x43 ('C')
+[06:07:45.299]   TX probe-43 [5B]: 43 00 00 01 00  |C....|
+[06:07:46.500]   RX probe-43: TIMEOUT (keine Antwort)
+[06:07:46.500] 
+[G] probe 0x41 ('A')
+[06:07:46.500]   TX probe-41 [5B]: 41 00 00 01 00  |A....|
+[06:07:47.705]   RX probe-41: TIMEOUT (keine Antwort)
+[06:07:47.705] 
+[G] probe 0x72 ('r')
+[06:07:47.705]   TX probe-72 [5B]: 72 00 00 01 00  |r....|
+[06:07:48.910]   RX probe-72: TIMEOUT (keine Antwort)
+[06:07:49.322] 
+=======================================================
+[06:07:49.322] BAUD 57600
+[06:07:49.322] =======================================================
+[06:07:49.486] 
+[A] CMD_GET_VERSION 0x56
+[06:07:49.487]   TX GET_VERSION [1B]: 56  |V|
+[06:07:50.897]   RX GET_VERSION: TIMEOUT (keine Antwort)
+[06:07:50.897] 
+[B] CMD_GET_EMU_MODE 0x6D
+[06:07:50.897]   TX GET_EMU_MODE [1B]: 6D  |m|
+[06:07:52.099]   RX GET_EMU_MODE: TIMEOUT (keine Antwort)
+[06:07:52.099] 
+[C] CMD_BULK_READ 0x52 addr=0x0000 size=0x0100
+[06:07:52.099]   TX BULK_READ hdr [5B]: 52 00 00 01 00  |R....|
+[06:07:53.704]   RX BULK_READ hdr: TIMEOUT (keine Antwort)
+[06:07:53.704] 
+[D] CMD_SET_BAUD 0x53 -> 115200
+[06:07:53.705]   TX SET_BAUD [5B]: 53 00 01 C2 00  |S....|
+[06:07:55.019]   RX SET_BAUD: TIMEOUT (keine Antwort)
+[06:07:55.019] 
+[E] ACK-Probe 0x06
+[06:07:55.019]   TX ACK-probe [1B]: 06  |.|
+[06:07:56.131]   RX ACK-probe: TIMEOUT (keine Antwort)
+[06:07:56.131] 
+[F] CMD_BULK_WRITE 0x57 header addr=0x0000 size=0x0100
+[06:07:56.132]   TX BULK_WRITE hdr [5B]: 57 00 00 01 00  |W....|
+[06:07:57.439]   RX BULK_WRITE hdr: TIMEOUT (keine Antwort)
+[06:07:57.439] 
+[G] probe 0x52 ('R')
+[06:07:57.440]   TX probe-52 [5B]: 52 00 00 01 00  |R....|
+[06:07:58.656]   RX probe-52: TIMEOUT (keine Antwort)
+[06:07:58.656] 
+[G] probe 0x43 ('C')
+[06:07:58.656]   TX probe-43 [5B]: 43 00 00 01 00  |C....|
+[06:07:59.857]   RX probe-43: TIMEOUT (keine Antwort)
+[06:07:59.857] 
+[G] probe 0x41 ('A')
+[06:07:59.858]   TX probe-41 [5B]: 41 00 00 01 00  |A....|
+[06:08:01.060]   RX probe-41: TIMEOUT (keine Antwort)
+[06:08:01.060] 
+[G] probe 0x72 ('r')
+[06:08:01.060]   TX probe-72 [5B]: 72 00 00 01 00  |r....|
+[06:08:02.261]   RX probe-72: TIMEOUT (keine Antwort)
+[06:08:02.688] 
+=======================================================
+[06:08:02.688] BAUD 19200
+[06:08:02.688] =======================================================
+[06:08:02.843] 
+[A] CMD_GET_VERSION 0x56
+[06:08:02.844]   TX GET_VERSION [1B]: 56  |V|
+[06:08:04.254]   RX GET_VERSION: TIMEOUT (keine Antwort)
+[06:08:04.254] 
+[B] CMD_GET_EMU_MODE 0x6D
+[06:08:04.255]   TX GET_EMU_MODE [1B]: 6D  |m|
+[06:08:05.457]   RX GET_EMU_MODE: TIMEOUT (keine Antwort)
+[06:08:05.458] 
+[C] CMD_BULK_READ 0x52 addr=0x0000 size=0x0100
+[06:08:05.458]   TX BULK_READ hdr [5B]: 52 00 00 01 00  |R....|
+[06:08:07.066]   RX BULK_READ hdr: TIMEOUT (keine Antwort)
+[06:08:07.066] 
+[D] CMD_SET_BAUD 0x53 -> 115200
+[06:08:07.067]   TX SET_BAUD [5B]: 53 00 01 C2 00  |S....|
+[06:08:08.377]   RX SET_BAUD: TIMEOUT (keine Antwort)
+[06:08:08.377] 
+[E] ACK-Probe 0x06
+[06:08:08.377]   TX ACK-probe [1B]: 06  |.|
+[06:08:09.484]   RX ACK-probe: TIMEOUT (keine Antwort)
+[06:08:09.484] 
+[F] CMD_BULK_WRITE 0x57 header addr=0x0000 size=0x0100
+[06:08:09.484]   TX BULK_WRITE hdr [5B]: 57 00 00 01 00  |W....|
+[06:08:10.794]   RX BULK_WRITE hdr: TIMEOUT (keine Antwort)
+[06:08:10.794] 
+[G] probe 0x52 ('R')
+[06:08:10.795]   TX probe-52 [5B]: 52 00 00 01 00  |R....|
+[06:08:12.002]   RX probe-52: TIMEOUT (keine Antwort)
+[06:08:12.003] 
+[G] probe 0x43 ('C')
+[06:08:12.003]   TX probe-43 [5B]: 43 00 00 01 00  |C....|
+[06:08:13.206]   RX probe-43: TIMEOUT (keine Antwort)
+[06:08:13.206] 
+[G] probe 0x41 ('A')
+[06:08:13.206]   TX probe-41 [5B]: 41 00 00 01 00  |A....|
+[06:08:14.422]   RX probe-41: TIMEOUT (keine Antwort)
+[06:08:14.422] 
+[G] probe 0x72 ('r')
+[06:08:14.422]   TX probe-72 [5B]: 72 00 00 01 00  |r....|
+[06:08:15.626]   RX probe-72: TIMEOUT (keine Antwort)

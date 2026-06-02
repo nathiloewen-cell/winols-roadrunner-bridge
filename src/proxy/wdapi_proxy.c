@@ -38,7 +38,7 @@ static void wlog(const char* fmt, ...);
 /* MoatesWare protocol */
 #define RR_CMD_WRITE      0x57   /* 'W' BulkWrite */
 #define RR_ACK            0x06   /* ACK byte */
-#define RR_BAUD           115200
+/* RR_BAUD defined in rr_crypto.h as 921600 */
 #define RR_TIMEOUT_MS     5000
 #define RR_DEFAULT_PORT   "COM13"  /* TTL adapter (fixed after EEPROM repair) */
 
@@ -51,26 +51,34 @@ static BYTE rr_checksum(const BYTE* data, DWORD len) {
 }
 
 static BOOL rr_open(const char* portname) {
+    /* Try D2XX first — VCP may be disabled on this FTDI device */
+    if (rr_open_d2xx()) {
+        g_rr_com = (HANDLE)(uintptr_t)0xD2FFFACE;  /* sentinel: D2XX active */
+        return TRUE;
+    }
+    /* Fall back to COM port */
     char path[32];
     _snprintf(path, sizeof(path), "\\\\.\\%s", portname);
     HANDLE h = CreateFileA(path, GENERIC_READ|GENERIC_WRITE, 0, NULL,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE) {
-        wlog("RR: open %s failed: %lu", portname, GetLastError());
+        wlog("RR: COM open %s failed: %lu", portname, GetLastError());
         return FALSE;
     }
     DCB dcb = {0}; dcb.DCBlength = sizeof(dcb);
     GetCommState(h, &dcb);
-    dcb.BaudRate = RR_BAUD; dcb.ByteSize = 8;
+    dcb.BaudRate = 9600; dcb.ByteSize = 8;
     dcb.Parity = NOPARITY; dcb.StopBits = ONESTOPBIT;
-    dcb.fBinary = TRUE; dcb.fDtrControl = DTR_CONTROL_ENABLE;
-    dcb.fRtsControl = RTS_CONTROL_ENABLE;
+    dcb.fBinary = TRUE; dcb.fDtrControl = DTR_CONTROL_DISABLE;
+    dcb.fRtsControl = RTS_CONTROL_DISABLE;
+    dcb.fOutxCtsFlow = FALSE; dcb.fOutxDsrFlow = FALSE; dcb.fDsrSensitivity = FALSE;
     SetCommState(h, &dcb);
-    COMMTIMEOUTS to = {50, 2, RR_TIMEOUT_MS, 2, RR_TIMEOUT_MS};
+    EscapeCommFunction(h, CLRDTR); EscapeCommFunction(h, CLRRTS);
+    COMMTIMEOUTS to = {50, 2, 1500, 2, 1500};
     SetCommTimeouts(h, &to);
     PurgeComm(h, PURGE_RXCLEAR|PURGE_TXCLEAR);
     g_rr_com = h;
-    wlog("RR: opened %s at %d baud", portname, RR_BAUD);
+    wlog("RR: COM opened %s at 9600 (DTR disabled)", portname);
     return TRUE;
 }
 
@@ -362,14 +370,10 @@ BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID res) {
         } else {
             wlog("wdapi proxy loaded (standalone fallback — real DLL not found)");
         }
-        /* Sprint 3: Try to open Roadrunner COM port at startup.
-           Roadrunner must be connected BEFORE WinOLS starts.
-           If not found now, bridge will not work during Load. */
-        if (rr_autodetect()) {
-            wlog("S3: Roadrunner connected — Load Bridge ready");
-        } else {
-            wlog("S3: Roadrunner NOT found — connect it and restart WinOLS");
-        }
+        /* Sprint 3: COM port opened LAZILY at Load-time (not at startup).
+           Opening at startup disrupts the Roadrunner during OLS300 operation.
+           The port will be opened when the DMA pointer command is received. */
+        wlog("S3: Load Bridge bereit — COM13 wird bei Load geoeffnet");
         /* Schedule startup pfDeviceAttach using fixed ols_32on32.exe addresses.
            Fire after 2s so WinOLS main window is ready.
            Works because ols_32on32.exe has no ASLR (packed exe = fixed base). */
@@ -539,6 +543,28 @@ DWORD __cdecl WDU_Init(WDU_DRIVER_HANDLE* phDriver,
     wlog("WDU_Init: VID=0x%04X PID=0x%04X",
          pMatchTables ? pMatchTables[0].wVendorId : 0,
          pMatchTables ? pMatchTables[0].wProductId : 0);
+
+    /* Open Roadrunner UART BEFORE activating USB — at this point the Roadrunner
+       MCU is still in native/command mode and will respond to 56 56 version req.
+       Once USB is active the MCU may switch to emulation mode and ignore UART.
+       DTR is kept LOW (see rr_open) to prevent accidental MCU reset.           */
+    if (g_rr_com == INVALID_HANDLE_VALUE) {
+        wlog("WDU_Init: opening COM13 before USB init...");
+        if (!rr_open("COM13")) rr_autodetect();
+        if (g_rr_com != INVALID_HANDLE_VALUE) {
+            wlog("WDU_Init: COM13 open — running init handshake at 9600...");
+            if (rr_init_with_baud(g_rr_com)) {
+                /* Switch timeouts to data-transfer mode after init */
+                COMMTIMEOUTS to2 = {50, 2, 5000, 2, 5000};
+                SetCommTimeouts(g_rr_com, &to2);
+                wlog("WDU_Init: Roadrunner UART init OK — ready for Load");
+            } else {
+                wlog("WDU_Init: Roadrunner UART init FAILED (no 56 56 response)");
+            }
+        } else {
+            wlog("WDU_Init: COM13 not available");
+        }
+    }
 
     /* Try real wdapi — first open driver with demo license, then init USB */
     typedef DWORD (__cdecl *PFN_OPEN)(DWORD, const char*);
@@ -816,53 +842,87 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
 
         /* ── Sprint 3: Load Bridge ───────────────────────────────────────
            Parse OLS300 DMA pointer commands and write ECU data to Roadrunner.
-           We are IN-PROCESS in WinOLS so we can read its VA directly.      */
+           UART (COM13) was already opened+inited in WDU_Init before USB activated.
+           We are IN-PROCESS in WinOLS so we can read its VA directly.           */
         BYTE* cmd = (BYTE*)pBuffer;
         if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x28) {
-            /* Command 0x1E 0x28: WinOLS sets DMA pointer to ECU data.
-               bytes[4..7] = LE 32-bit VA in WinOLS process memory.
-               Since our DLL runs inside WinOLS, we can dereference this directly. */
             DWORD va = ((DWORD)cmd[4]) | ((DWORD)cmd[5]<<8) |
                        ((DWORD)cmd[6]<<16) | ((DWORD)cmd[7]<<24);
             g_dma_start_addr = va;
             g_bridge_done = FALSE;
-            wlog("S3: DMA addr=0x%08lX size=0x%04X", (unsigned long)va, (unsigned)g_dma_size);
+            wlog("S3: DMA addr=0x%08lX size=0x%04X rr_com=%s",
+                 (unsigned long)va, (unsigned)g_dma_size,
+                 g_rr_com != INVALID_HANDLE_VALUE ? "OPEN" : "CLOSED");
 
-            if (g_rr_com != INVALID_HANDLE_VALUE && va > 0x10000 && !g_bridge_done) {
+            if (va > 0x10000 && !g_bridge_done) {
+                g_bridge_done = TRUE;
                 BYTE* ecuData = (BYTE*)(uintptr_t)va;
-                DWORD total_blocks = (g_dma_size + 255) / 256;
-                wlog("S3: Writing %lu blocks to Roadrunner (power-cycled = shift[0]=0)...",
-                     (unsigned long)total_blocks);
-                int ok = 1;
-                /* Open COM port with correct serial settings for Roadrunner */
-                DCB dcb2 = {0}; dcb2.DCBlength = sizeof(dcb2);
-                GetCommState(g_rr_com, &dcb2);
-                dcb2.BaudRate = RR_BAUD;
-                dcb2.ByteSize = 8; dcb2.Parity = NOPARITY; dcb2.StopBits = ONESTOPBIT;
-                dcb2.fBinary = TRUE; dcb2.fDtrControl = DTR_CONTROL_ENABLE;
-                dcb2.fRtsControl = RTS_CONTROL_ENABLE;
-                SetCommState(g_rr_com, &dcb2);
-                COMMTIMEOUTS to2 = {50, 2, 5000, 2, 5000};
-                SetCommTimeouts(g_rr_com, &to2);
-                PurgeComm(g_rr_com, PURGE_RXCLEAR|PURGE_TXCLEAR);
+                DWORD total = (g_dma_size + 255) / 256;
 
-                for (DWORD blk = 0; blk < total_blocks && ok; blk++) {
-                    BYTE plain[256] = {0};
-                    DWORD off = blk * 256;
-                    DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
-                    memcpy(plain, ecuData + off, copy);
-                    ok = rr_write_block_com(g_rr_com, (int)blk, plain);
-                    if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                /* STRATEGY: MCU ignores UART when USB is active (FT245R PWREN# low).
+                   Solution: call real WDU_Uninit → USB released → PWREN# high →
+                   MCU enters UART download mode → write blocks → done.
+                   WinOLS doesn't notice because we fake ALL EP6/EP2 responses.   */
+                wlog("S3: Releasing USB (WDU_Uninit) to put MCU in download mode...");
+                if (g_real_driver_handle) {
+                    typedef DWORD (__cdecl *FN)(WDU_DRIVER_HANDLE);
+                    FN fn_uninit = (FN)get_real("WDU_Uninit");
+                    if (fn_uninit) {
+                        DWORD r = fn_uninit(g_real_driver_handle);
+                        wlog("S3: real WDU_Uninit -> 0x%lX", (unsigned long)r);
+                        g_real_driver_handle = NULL;
+                    }
                 }
-                if (ok) {
-                    g_bridge_done = TRUE;
-                    wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks → Roadrunner",
-                         (unsigned long)total_blocks);
+                Sleep(300);  /* wait for MCU to detect USB disconnect and return to download mode */
+
+                /* Reopen D2XX handle — it may be invalidated after WDU_Uninit
+                   changed USB device state. FT_Open by index 0 is fast now.    */
+                if (g_rr_ft && g_FT_Close) {
+                    g_FT_Close(g_rr_ft); g_rr_ft = NULL;
+                    wlog("S3: D2XX handle closed, reopening...");
+                }
+                if (g_FT_Open) {
+                    void* fth2 = NULL;
+                    ULONG rs = g_FT_Open(0, &fth2);
+                    if (rs == 0 && fth2) {
+                        g_rr_ft = fth2;
+                        if (g_FT_SetBitMode) g_FT_SetBitMode(fth2, 0, 0);
+                        if (g_FT_SetBaudRate) g_FT_SetBaudRate(fth2, RR_BAUD);
+                        if (g_FT_SetDataCharacteristics) g_FT_SetDataCharacteristics(fth2, 8, 0, 0);
+                        if (g_FT_SetFlowControl) g_FT_SetFlowControl(fth2, 0, 0, 0);
+                        if (g_FT_SetLatencyTimer) g_FT_SetLatencyTimer(fth2, 2);
+                        if (g_FT_SetTimeouts) g_FT_SetTimeouts(fth2, 1500, 1500);
+                        if (g_FT_ClrDtr) g_FT_ClrDtr(fth2);
+                        if (g_FT_Purge) g_FT_Purge(fth2, 1|2);
+                        wlog("S3: D2XX reopened (index 0) fth=%p", fth2);
+                    } else {
+                        wlog("S3: D2XX reopen FAILED rs=%lu", (unsigned long)rs);
+                    }
+                }
+                Sleep(100);
+
+                /* Now write via UART (MCU in download mode, no USB) */
+                wlog("S3: Re-init via UART nach USB-Freigabe...");
+                if (g_rr_com != INVALID_HANDLE_VALUE && rr_init_with_baud(g_rr_com)) {
+                    wlog("S3: UART init OK — schreibe %lu Blocks...", (unsigned long)total);
+                    Sleep(100);
+                    if (g_rr_ft && g_FT_Purge) g_FT_Purge(g_rr_ft, 1|2);
+                    int ok = 1;
+                    for (DWORD blk = 0; blk < total && ok; blk++) {
+                        BYTE plain[256] = {0};
+                        DWORD off = blk * 256;
+                        DWORD copy = (g_dma_size - off < 256) ? (g_dma_size - off) : 256;
+                        memcpy(plain, ecuData + off, copy);
+                        ok = rr_write_block_com(g_rr_com, (int)blk, plain);
+                        if (!ok) wlog("S3: Block %lu FAILED", (unsigned long)blk);
+                    }
+                    if (ok) wlog("S3: *** EPROM WRITE COMPLETE *** %lu blocks", (unsigned long)total);
+                    else    wlog("S3: Write FAILED");
                 } else {
-                    wlog("S3: Write FAILED");
+                    wlog("S3: UART init FAILED nach USB-Freigabe");
                 }
             } else if (g_rr_com == INVALID_HANDLE_VALUE) {
-                wlog("S3: Roadrunner nicht verbunden — COM-Port nicht offen");
+                wlog("S3: UART nicht bereit — Init in WDU_Init fehlgeschlagen");
             }
         }
         if (dwBytes == 8 && cmd[0] == 0x1E && cmd[1] == 0x2C) {
@@ -892,19 +952,22 @@ DWORD __cdecl WDU_Transfer(WDU_DEVICE_HANDLE hDevice,
                          → try echoing back buf[1] in byte[0] as ACK
                other:    all zeros */
             if (dwBytes == 64 && dwBytes > 1) {
-                /* Firmware version check: WinOLS reads (buf[0]<<8)|buf[1] = 0x044A */
-                ((BYTE*)pBuffer)[0] = 0x04;  /* checksum high byte */
-                ((BYTE*)pBuffer)[1] = 0x4A;  /* checksum low byte */
+                /* WinOLS reads checksum as little-endian WORD at offset 0:
+                   val = buf[0] | (buf[1]<<8). Need val=0x044A → buf[0]=0x4A, buf[1]=0x04 */
+                ((BYTE*)pBuffer)[0] = 0x4A;  /* LE low byte of 0x044A */
+                ((BYTE*)pBuffer)[1] = 0x04;  /* LE high byte of 0x044A */
             } else if (dwBytes == 8) {
-                /* EPROM config: echo command byte as ACK indicator */
-                /* Try: first byte = 0x30 (echoing the sub-command) */
-                ((BYTE*)pBuffer)[0] = 0x00;
+                /* 0x20 0x30 hardware status: 0x00=defective, 0x01=OK.
+                   Return 0x01 so WinOLS proceeds past the check to send DMA pointer. */
+                ((BYTE*)pBuffer)[0] = 0x01;
                 ((BYTE*)pBuffer)[1] = 0x00;
+                wlog("EP2 IN 8b: returning status=01 (OK) for cmd 20 30");
             }
             /* For other sizes: all zeros = ACK/success */
             if (pdwBytesTransferred) *pdwBytesTransferred = dwBytes;
-            wlog("WDU_Transfer EP2 IN pipe=0x%02lX %lu bytes -> fw_checksum=044A",
-                 (unsigned long)dwPipeNum, (unsigned long)dwBytes);
+            wlog("WDU_Transfer EP2 IN pipe=0x%02lX %lu bytes -> LE_val=%04X (want 044A)",
+                 (unsigned long)dwPipeNum, (unsigned long)dwBytes,
+                 (unsigned)(((BYTE*)pBuffer)[0] | (((BYTE*)pBuffer)[1]<<8)));
             return 0;
         }
         /* Generic RX (EP6 already handled above): return FTDI status bytes.

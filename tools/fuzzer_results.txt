@@ -1,0 +1,136 @@
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=(no status found)
+[1] sync_55AA: rejected | status=(no status found)
+[2] OLS821_off0: rejected | status=(no status found)
+[3] OLS821_off80: rejected | status=(no status found)
+[4] sync+OLS821_off2: rejected | status=(no status found)
+[5] sync+OLS821_off10: rejected | status=(no status found)
+[6] v1+OLS821_off4: rejected | status=(no status found)
+[7] len28_type30: rejected | status=(no status found)
+[8] 0x30_prefix: rejected | status=(no status found)
+[9] sync_AA55: rejected | status=(no status found)
+[10] type_0F: rejected | status=(no status found)
+[11] sync+type0F: rejected | status=(no status found)
+[12] all_FF: rejected | status=(no status found)
+[13] sync+len64: rejected | status=(no status found)
+[14] repeating_sync: rejected | status=(no status found)
+[15] OLS300_off0: rejected | status=(no status found)
+[16] sync+OLS300_off2: rejected | status=(no status found)
+
+=== Fuzzer run started ===
+[0] all_zeros: *** ACCEPTED *** | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=55
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=59
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=63
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=67
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=71
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=75
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=79
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=83
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=80
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=76
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=72
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+
+=== Fuzzer run started ===
+[0] all_zeros: rejected | status=TX=False EP2OUT=False struct=0xDC38D855 status=? log_lines=68
+[1] sync_55AA: rejected | status=TX=False EP2OUT=False struct=0xDE84D84D status=? log_lines=68
+[2] OLS821_off0: rejected | status=TX=False EP2OUT=False struct=0xDEB6D842 status=? log_lines=68
+[3] OLS821_off80: rejected | status=TX=False EP2OUT=False struct=0xDF9ED867 status=? log_lines=68
+[4] sync+OLS821_off2: rejected | status=TX=False EP2OUT=False struct=0xDC79D854 status=? log_lines=68
+[5] sync+OLS821_off10: rejected | status=TX=False EP2OUT=False struct=0xDF9ED867 status=? log_lines=68
+[6] v1+OLS821_off4: rejected | status=TX=False EP2OUT=False struct=0xDE9BD843 status=? log_lines=68
+[7] len28_type30: rejected | status=TX=False EP2OUT=False struct=0xDE54D841 status=? log_lines=68
+[8] 0x30_prefix: rejected | status=TX=False EP2OUT=False struct=0xDC38D855 status=? log_lines=68
+[9] sync_AA55: rejected | status=TX=False EP2OUT=False struct=0xDEE9D857 status=? log_lines=68
+[10] type_0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[11] sync+type0F: rejected | status=TX=False EP2OUT=False struct=0x00000000 status=? log_lines=68
+[12] all_FF: rejected | status=TX=False EP2OUT=False struct=0xDF9ED867 status=? log_lines=68
+[13] sync+len64: rejected | status=TX=False EP2OUT=False struct=0x0255C802 status=? log_lines=68
+[14] repeating_sync: rejected | status=TX=False EP2OUT=False struct=0xDEE9D857 status=? log_lines=68
+[15] OLS300_off0: rejected | status=TX=False EP2OUT=False struct=0x00010000 status=? log_lines=68
+[16] sync+OLS300_off2: rejected | status=TX=False EP2OUT=False struct=0xDC7DD865 status=? log_lines=68

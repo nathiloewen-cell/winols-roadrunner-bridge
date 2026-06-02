@@ -1,0 +1,10 @@
+-------------------------------
+EmUtility v1.00.0116.00
+Copyright (c) Mark Mansur
+-------------------------------
+
+Searching for emulator...
+
+FOUND: Roadrunner v12.15.R
+Writing 0x100 bytes from file address 0x00 to emulator address 0xFFF00 (Backfill)...
+SUCCESS: Operation completed...

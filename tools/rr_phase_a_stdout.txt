@@ -1,0 +1,7 @@
+-------------------------------
+EmUtility v1.00.0116.00
+Copyright (c) Mark Mansur
+-------------------------------
+
+Searching for emulator...
+Did not find hardware. Aborting...
