@@ -137,6 +137,77 @@ static volatile BOOL g_bridge_done = FALSE;
 static DWORD g_rom_base = 0;         /* actual Windows VA of ROM start (scan result) */
 static volatile BOOL g_dma_ready = FALSE;  /* set by 1E 2C — data is confirmed ready */
 static volatile int  g_scan_done = 0;      /* memory scan completed flag */
+
+/* ── Reconnect-loop write trap ──────────────────────────────────────────────
+   Problem: WinOLS spin-loop writes non-zero to [0x01FF9558] faster than any
+   thread can zero it. Solution: make the page read-only. Any write triggers
+   a PAGE_FAULT, our VEH catches it and writes 0 instead.
+
+   VEH approach:
+   1. VirtualProtect([0x01FF9558 page], PAGE_READONLY)
+   2. write → EXCEPTION_ACCESS_VIOLATION (op=1, write)
+   3. VEH: make page writable, write 0, restore read-only, skip instruction
+      (skip = advance EIP past the offending write instruction, determined by
+       scanning common MOV/AND/OR patterns at the fault address)
+   4. Result: every attempt to write non-zero is silently replaced by 0.
+*/
+static volatile BOOL g_write_trap_active = FALSE;
+static DWORD g_trap_page = 0;
+static DWORD g_trap_old_prot = 0;
+#define TRAP_ADDR1 0x01FF9558u
+#define TRAP_ADDR2 0x01A99558u
+
+static void start_write_trap(void) {
+    if (g_write_trap_active) return;
+    /* Find the page containing both trap addresses */
+    g_trap_page = TRAP_ADDR1 & ~0xFFFu;  /* 4KB page-aligned */
+    if (VirtualProtect((PVOID)(uintptr_t)g_trap_page, 0x1000,
+                       PAGE_READONLY, &g_trap_old_prot)) {
+        g_write_trap_active = TRUE;
+        wlog("write_trap: PAGE_READONLY on 0x%08lX (old_prot=0x%lX)",
+             (unsigned long)g_trap_page, (unsigned long)g_trap_old_prot);
+    } else {
+        wlog("write_trap: VirtualProtect FAILED (%lu)", GetLastError());
+    }
+}
+static void stop_write_trap(void) {
+    if (!g_write_trap_active) return;
+    g_write_trap_active = FALSE;
+    DWORD tmp;
+    VirtualProtect((PVOID)(uintptr_t)g_trap_page, 0x1000, g_trap_old_prot, &tmp);
+    wlog("write_trap: restored prot=0x%lX", (unsigned long)g_trap_old_prot);
+}
+/* Called by VEH when write violation at TRAP_ADDR1/2 detected */
+static BOOL handle_write_trap(EXCEPTION_POINTERS* pEx) {
+    DWORD fault = (DWORD)pEx->ExceptionRecord->ExceptionInformation[1];
+    if (fault != TRAP_ADDR1 && fault != TRAP_ADDR2) return FALSE;
+    /* Temporarily make page writable, write 0, restore read-only */
+    DWORD tmp;
+    VirtualProtect((PVOID)(uintptr_t)g_trap_page, 0x1000,
+                   PAGE_READWRITE, &tmp);
+    *(volatile DWORD*)(uintptr_t)TRAP_ADDR1 = 0;
+    *(volatile DWORD*)(uintptr_t)TRAP_ADDR2 = 0;
+    VirtualProtect((PVOID)(uintptr_t)g_trap_page, 0x1000,
+                   PAGE_READONLY, &tmp);
+    /* Skip the faulting instruction by advancing EIP.
+       The write instruction is typically 6-7 bytes (MOV [abs32], reg).
+       We scan for the length by looking at the opcode. */
+    CONTEXT* ctx = pEx->ContextRecord;
+    BYTE* ip = (BYTE*)(uintptr_t)ctx->Eip;
+    int skip = 1;
+    /* Common write patterns and their sizes */
+    if (ip[0] == 0x89 && ip[1] == 0x05) skip = 6;  /* MOV [abs32], EAX */
+    else if (ip[0] == 0x89 && (ip[1]&0xF8)==0x05) skip = 6;  /* MOV [abs32], r */
+    else if (ip[0] == 0x89) skip = 6;   /* generic MOV r/m, r */
+    else if (ip[0] == 0xC7 && ip[1]==0x05) skip = 10; /* MOV [abs32], imm32 */
+    else if (ip[0] == 0x83) skip = 7;   /* AND/OR [abs32], imm8 */
+    ctx->Eip += skip;
+    return TRUE;
+}
+
+/* Aliases for backward compat */
+static void start_zero_loop(void)  { start_write_trap(); }
+static void stop_zero_loop(void)   { stop_write_trap();  }
 static volatile int  g_hw_check_done = 0; /* 0=init, 1=hw_check done, >1=ep6 reads after */
 static BYTE*         g_ols_obj = NULL;    /* OLS module Delphi object ptr */
 static volatile LONG g_attach2_fired_g = 0; /* global — reset by WDU_Uninit for reconnect */
@@ -322,6 +393,15 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* pEx) {
         /* Catch bad reads AND writes in null-guard and kernel ranges.
            op=0: read violation, op=1: write violation. Both need handling for
            WinLicense code that dereferences NULL after our XOR EAX,EAX patch. */
+        /* Check write trap first (intercept writes to reconnect handles) */
+        if (op == 1 && g_write_trap_active &&
+            (fault == TRAP_ADDR1 || fault == TRAP_ADDR2)) {
+            if (handle_write_trap(pEx)) {
+                InterlockedDecrement((LONG*)&g_veh_depth);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+
         BOOL is_bad = (fault < 0x10000 || fault >= 0x80000000);
 
         if (is_bad) {
@@ -728,6 +808,8 @@ static DWORD WINAPI attach_thread(LPVOID param) {
     }
     BOOL ok = g_attach_cb(safe_handle, use_device, g_attach_userdata);
     wlog("[attach] pfDeviceAttach returned %d", ok);
+    /* zero_loop keeps running — WinOLS just set [0x01FF9558] inside callback.
+       We stop it AFTER the 200ms zeroing block below.                          */
 
     /* After pfDeviceAttach: WinOLS sets [0x01FF9558]=0x00530026 (reconnect handle).
        Zero it repeatedly for 200ms so the reconnect loop sees 0 and exits via JZ.
@@ -741,6 +823,8 @@ static DWORD WINAPI attach_thread(LPVOID param) {
         }
         wlog("[attach] handles zeroed for 200ms (reconnect loop exit)");
     }
+    /* NOW stop the zero_loop — after 200ms+ of zeroing since pfDeviceAttach */
+    stop_zero_loop();
 
     /* Second pfDeviceAttach at +3s — activates Load/Disconnect button.
        Skip during reconnect: the second attach re-triggers the reconnect loop.
@@ -802,6 +886,10 @@ DWORD __cdecl WDU_Uninit(WDU_DRIVER_HANDLE hDriver) {
                  r1, ret1[0],ret1[1],ret1[2],ret1[3],ret1[4],ret1[5],ret1[6],ret1[7]);
         }
     }
+
+    /* Start continuous zero-loop to prevent spin-loop from seeing non-zero handles.
+       The loop runs until attach_thread completes successfully.                    */
+    start_zero_loop();
 
     /* Patch3: zero BOTH handles that the reconnect loops check.
        Loop 1 (first WDU_Uninit):  CMP [0x01FF9558],0 → if non-zero: spin
